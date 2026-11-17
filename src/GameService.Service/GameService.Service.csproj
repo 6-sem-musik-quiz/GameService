@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\GameService.Domain\GameService.Domain.csproj" />
+    <ProjectReference Include="..\GameService.Repository\GameService.Repository.csproj" />
+  </ItemGroup>
+</Project>
