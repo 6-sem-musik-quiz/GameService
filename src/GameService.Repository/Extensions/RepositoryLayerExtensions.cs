@@ -1,19 +1,13 @@
-using GameService.Repository.Data;
-using GameService.Repository.Interfaces;
-using GameService.Repository.Repositories;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace GameService.Repository.Extensions;
 
 public static class RepositoryLayerExtensions
 {
-    public static IServiceCollection AddRepositoryLayer(this IServiceCollection services, string connectionString)
+    // GameService has no SQL database in the C4 design (only UserDB, StatsDB and MusicDB do).
+    // Finished games go to RabbitMQ (ResultPublisher) when that is built.
+    public static IServiceCollection AddRepositoryLayer(this IServiceCollection services)
     {
-        services.AddDbContext<AppDbContext>(options => options.UseNpgsql(connectionString));
-
-        services.AddScoped<IExampleRepository, ExampleRepository>();
-
         return services;
     }
 }
