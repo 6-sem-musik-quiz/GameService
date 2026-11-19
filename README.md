@@ -47,6 +47,7 @@ dotnet run --project src/GameService.Api
 - API: http://localhost:5005
 - Swagger: http://localhost:5005/swagger
 - Health: http://localhost:5005/health
+- Ready (also checks Postgres): http://localhost:5005/health/ready
 - Postgres: `localhost:5445` (postgres / postgres)
 
 ## Database migrations
