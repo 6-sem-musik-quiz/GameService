@@ -55,6 +55,16 @@ public class GamePlayer
     public int Answered { get; set; }
     // Sorted by year, ascending.
     public List<TimelineCard> Timeline { get; set; } = [];
+    // One entry per ended round (SCRUM-150): right or not, and how fast.
+    public List<RoundHistory> History { get; set; } = [];
+}
+
+public class RoundHistory
+{
+    public int Round { get; init; }
+    public bool Correct { get; init; }
+    // Null when the player did not answer.
+    public int? AnsweredAfterMs { get; init; }
 }
 
 public class TimelineCard

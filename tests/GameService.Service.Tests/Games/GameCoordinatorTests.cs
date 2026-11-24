@@ -398,9 +398,152 @@ public class GameCoordinatorTests : IDisposable
 
         await _coordinator.SubmitAnswerAsync(game.Id, Alice, 1, 1);
 
-        Assert.Equal(new PlayerAnsweredDto(Alice), Assert.Single(_notifier.Messages.OfType<PlayerAnsweredDto>()));
-        Assert.Equal(["userId"], JsonSerializer.SerializeToElement(new PlayerAnsweredDto(Alice), JsonSerializerOptions.Web)
+        // Answered before playback started (still in startsInMs), so 0 ms.
+        Assert.Equal(new PlayerAnsweredDto(Alice, 0), Assert.Single(_notifier.Messages.OfType<PlayerAnsweredDto>()));
+        Assert.Equal(["userId", "answeredAfterMs"], JsonSerializer.SerializeToElement(new PlayerAnsweredDto(Alice, 0), JsonSerializerOptions.Web)
             .EnumerateObject().Select(p => p.Name));
+    }
+
+    // ---- Rival data (SCRUM-150) ----
+
+    private const int PlaybackDelayMs = 3000; // GameOptions.StartDelayMs
+
+    [Theory]
+    [InlineData(0, 0)]          // still in startsInMs: before playback
+    [InlineData(3000, 0)]       // the moment playback starts
+    [InlineData(7200, 4200)]    // 4.2 s into the song
+    [InlineData(33500, 30000)]  // in the grace second after the answer time: clamped to 30 s
+    public async Task AnsweredAfterMs_IsMeasuredFromPlaybackStart_AndClamped(int msSinceRoundStarted, int expected)
+    {
+        var game = await GameInRound1();
+
+        _time.Advance(TimeSpan.FromMilliseconds(msSinceRoundStarted));
+        await _coordinator.SubmitAnswerAsync(game.Id, Alice, 1, 1);
+
+        Assert.Equal(expected, _notifier.Messages.OfType<PlayerAnsweredDto>().Single().AnsweredAfterMs);
+    }
+
+    [Fact]
+    public async Task RoundEnded_HasEachAnswersTime_AndYearRange_AndNullsForNoAnswer()
+    {
+        var game = await GameInRound1(players: 3);
+        _time.Advance(TimeSpan.FromMilliseconds(PlaybackDelayMs + 2500));
+        await _coordinator.SubmitAnswerAsync(game.Id, Alice, 1, 1); // after 1970: right
+        _time.Advance(TimeSpan.FromMilliseconds(1000));
+        await _coordinator.SubmitAnswerAsync(game.Id, Bob, 1, 0);   // before 1970: wrong
+        // Carol does not answer; she is connected, so the round ends on time.
+        _time.Advance(TimeSpan.FromSeconds(30));
+
+        var results = Assert.Single(_notifier.RoundsEnded).Results;
+        var alice = results.Single(r => r.UserId == Alice);
+        Assert.Equal(2500, alice.AnsweredAfterMs);
+        Assert.Equal([1970, null], alice.Range); // after the last card
+        var bob = results.Single(r => r.UserId == Bob);
+        Assert.Equal(3500, bob.AnsweredAfterMs);
+        Assert.Equal([null, 1970], bob.Range);   // before the first card
+        var carol = results.Single(r => r.UserId == Carol);
+        Assert.Null(carol.AnsweredAfterMs);
+        Assert.Null(carol.Range);
+    }
+
+    [Fact]
+    public async Task Range_BetweenTwoCards_UsesTheTimelineBeforeThisRoundsCard()
+    {
+        var game = await GameInRound1();
+        await AllReady(game, 2);
+        await AllAnswer(game, 1, slotIndex: 1); // both right: timelines are now 1970, 1971
+        PauseBetweenRounds();                   // round 2 plays 1972
+
+        await _coordinator.SubmitAnswerAsync(game.Id, Alice, 2, 1); // between 1970 and 1971: wrong
+        await _coordinator.SubmitAnswerAsync(game.Id, Bob, 2, 2);   // after 1971: right
+
+        var results = _notifier.RoundsEnded.Last().Results;
+        Assert.Equal([1970, 1971], results.Single(r => r.UserId == Alice).Range);
+        Assert.Equal([1971, null], results.Single(r => r.UserId == Bob).Range);
+    }
+
+    [Fact]
+    public void RoundResult_SerializesNullsForNoAnswer_AndTheRangeAsAnArray()
+    {
+        var noAnswer = JsonSerializer.SerializeToElement(
+            new RoundResultDto(3, "carol", null, false, 0, [], null, null), JsonSerializerOptions.Web);
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, noAnswer.GetProperty("answeredAfterMs").ValueKind);
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, noAnswer.GetProperty("range").ValueKind);
+
+        var openEnd = JsonSerializer.SerializeToElement(
+            new RoundResultDto(1, "alice", 0, true, 1, [], 1200, [null, 1970]), JsonSerializerOptions.Web);
+        Assert.Equal("[null,1970]", openEnd.GetProperty("range").GetRawText());
+    }
+
+    [Fact]
+    public async Task State_HasEveryonesCardsHistoryAndThePastSongs_GrowingOnePerRound()
+    {
+        var game = await GameInRound1();
+        await AllReady(game, 2);
+        _time.Advance(TimeSpan.FromMilliseconds(PlaybackDelayMs + 1000));
+        await _coordinator.SubmitAnswerAsync(game.Id, Alice, 1, 1); // right, after 1000 ms
+        await _coordinator.SubmitAnswerAsync(game.Id, Bob, 1, 0);   // wrong, after 1000 ms
+
+        var afterRound1 = await Join(game, Alice, "conn-1b");
+        Assert.Equal([new PastSongDto(1, afterRound1.PastSongs[0].Song)], afterRound1.PastSongs);
+        Assert.Equal(("Song 1", 1971), (afterRound1.PastSongs[0].Song.Title, afterRound1.PastSongs[0].Song.Year));
+        var bob = afterRound1.Players.Single(p => p.UserId == Bob);
+        Assert.Equal([1970], bob.Timeline.Select(c => c.Year));
+        Assert.Equal([new RoundHistoryDto(1, false, 1000)], bob.History);
+        var alice = afterRound1.Players.Single(p => p.UserId == Alice);
+        Assert.Equal([1970, 1971], alice.Timeline.Select(c => c.Year));
+        Assert.Equal([new RoundHistoryDto(1, true, 1000)], alice.History);
+
+        PauseBetweenRounds();
+        _time.Advance(TimeSpan.FromSeconds(34)); // round 2 times out, nobody answers
+
+        var afterRound2 = await Join(game, Alice, "conn-1c");
+        Assert.Equal([1, 2], afterRound2.PastSongs.Select(s => s.Round));
+        Assert.Equal(new RoundHistoryDto(2, false, null), afterRound2.Players.Single(p => p.UserId == Bob).History[^1]);
+    }
+
+    [Fact]
+    public async Task AnsweredOrder_FollowsTheOrderOfAnswers_AndResetsWithTheNextRound()
+    {
+        var game = await GameInRound1(players: 3);
+        await AllReady(game, 2);
+        await _coordinator.SubmitAnswerAsync(game.Id, Bob, 1, 0);
+        await _coordinator.SubmitAnswerAsync(game.Id, Alice, 1, 1);
+
+        var during = await Join(game, Carol, "conn-3b");
+        Assert.Equal(2, during.Players.Single(p => p.UserId == Alice).AnsweredOrder);
+        Assert.Equal(1, during.Players.Single(p => p.UserId == Bob).AnsweredOrder);
+        Assert.Null(during.Players.Single(p => p.UserId == Carol).AnsweredOrder);
+
+        await _coordinator.SubmitAnswerAsync(game.Id, Carol, 1, 0); // everyone answered: round ends
+        PauseBetweenRounds();                                       // round 2 starts
+
+        var next = await Join(game, Carol, "conn-3c");
+        Assert.Equal(2, next.Round);
+        Assert.All(next.Players, p => Assert.Null(p.AnsweredOrder));
+    }
+
+    [Fact]
+    public async Task StateDuringARound_NeverContainsTheRoundsSongOrAnyPlacement()
+    {
+        var game = await GameInRound1();
+        await _coordinator.SubmitAnswerAsync(game.Id, Alice, 1, 1); // a right answer, not yet judged
+
+        var during = await Join(game, Bob, "conn-2b");
+        _time.Advance(TimeSpan.FromMilliseconds(PlaybackDelayMs + 30_500)); // the grace second
+        var inGrace = await Join(game, Bob, "conn-2c");
+
+        foreach (var state in new[] { during, inGrace })
+        {
+            Assert.Empty(state.PastSongs);
+            Assert.All(state.Players, p => Assert.Empty(p.History));
+            Assert.DoesNotContain(state.Players.SelectMany(p => p.Timeline), c => c.Year == 1971 || c.Title == "Song 1");
+            Assert.DoesNotContain(state.MyTimeline, c => c.Year == 1971);
+        }
+        var json = JsonSerializer.Serialize(during, JsonSerializerOptions.Web);
+        Assert.DoesNotContain("Song 1\"", json);
+        Assert.DoesNotContain("1971", json);
+        Assert.DoesNotContain("slot", json, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
