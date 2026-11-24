@@ -102,6 +102,134 @@ public class ResultPublisherTests
     }
 
     [Fact]
+    public async Task PublishGameFinishedAsync_ReusesExistingChannel_OnMultipleCalls()
+    {
+        // Arrange
+        var publisher = new ResultPublisher(
+            Microsoft.Extensions.Options.Options.Create(_options),
+            NullLogger<ResultPublisher>.Instance,
+            _connectionFactory);
+
+        var evt1 = new GameFinishedEvent { GameId = Guid.NewGuid() };
+        var evt2 = new GameFinishedEvent { GameId = Guid.NewGuid() };
+
+        // Act
+        await publisher.PublishGameFinishedAsync(evt1);
+        await publisher.PublishGameFinishedAsync(evt2);
+
+        // Assert - connection and channel are only created once
+        await _connectionFactory.Received(1).CreateConnectionAsync(Arg.Any<CancellationToken>());
+        await _connection.Received(1).CreateChannelAsync(Arg.Any<CreateChannelOptions?>(), Arg.Any<CancellationToken>());
+        await _channel.Received(2).BasicPublishAsync(
+            exchange: "game-events",
+            routingKey: "game.finished.v1",
+            mandatory: false,
+            basicProperties: Arg.Any<BasicProperties>(),
+            body: Arg.Any<ReadOnlyMemory<byte>>(),
+            cancellationToken: Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task PublishGameFinishedAsync_RecreatesChannel_WhenPreviousChannelIsClosed()
+    {
+        // Arrange
+        var newChannel = Substitute.For<IChannel>();
+        newChannel.IsOpen.Returns(true);
+
+        _channel.IsOpen.Returns(false); // first channel closed
+        _connection.CreateChannelAsync(Arg.Any<CreateChannelOptions?>(), Arg.Any<CancellationToken>()).Returns(newChannel);
+
+        var publisher = new ResultPublisher(
+            Microsoft.Extensions.Options.Options.Create(_options),
+            NullLogger<ResultPublisher>.Instance,
+            _connectionFactory);
+
+        var evt = new GameFinishedEvent { GameId = Guid.NewGuid() };
+
+        // Act
+        await publisher.PublishGameFinishedAsync(evt);
+
+        // Assert - created channel on the active connection
+        await newChannel.Received(1).BasicPublishAsync(
+            exchange: "game-events",
+            routingKey: "game.finished.v1",
+            mandatory: false,
+            basicProperties: Arg.Any<BasicProperties>(),
+            body: Arg.Any<ReadOnlyMemory<byte>>(),
+            cancellationToken: Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task DisposeAsync_ClosesAndDisposesChannelAndConnection()
+    {
+        // Arrange
+        var publisher = new ResultPublisher(
+            Microsoft.Extensions.Options.Options.Create(_options),
+            NullLogger<ResultPublisher>.Instance,
+            _connectionFactory);
+
+        await publisher.PublishGameFinishedAsync(new GameFinishedEvent { GameId = Guid.NewGuid() });
+
+        // Act
+        await publisher.DisposeAsync();
+
+        // Assert
+        await _channel.Received(1).CloseAsync(Arg.Any<CancellationToken>());
+        _channel.Received(1).Dispose();
+        await _connection.Received(1).CloseAsync(Arg.Any<CancellationToken>());
+        _connection.Dispose();
+    }
+
+    [Fact]
+    public async Task DisposeAsync_IsIdempotent_CanBeCalledMultipleTimes()
+    {
+        // Arrange
+        var publisher = new ResultPublisher(
+            Microsoft.Extensions.Options.Options.Create(_options),
+            NullLogger<ResultPublisher>.Instance,
+            _connectionFactory);
+
+        // Act & Assert (does not throw)
+        await publisher.DisposeAsync();
+        await publisher.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task PublishGameFinishedAsync_PropagatesCancellationToken()
+    {
+        // Arrange
+        using var cts = new CancellationTokenSource();
+        var token = cts.Token;
+
+        var publisher = new ResultPublisher(
+            Microsoft.Extensions.Options.Options.Create(_options),
+            NullLogger<ResultPublisher>.Instance,
+            _connectionFactory);
+
+        var evt = new GameFinishedEvent { GameId = Guid.NewGuid() };
+
+        // Act
+        await publisher.PublishGameFinishedAsync(evt, token);
+
+        // Assert - token is passed down
+        await _channel.Received(1).ExchangeDeclareAsync(
+            exchange: "game-events",
+            type: ExchangeType.Topic,
+            durable: true,
+            autoDelete: false,
+            arguments: null,
+            cancellationToken: token);
+
+        await _channel.Received(1).BasicPublishAsync(
+            exchange: "game-events",
+            routingKey: "game.finished.v1",
+            mandatory: false,
+            basicProperties: Arg.Any<BasicProperties>(),
+            body: Arg.Any<ReadOnlyMemory<byte>>(),
+            cancellationToken: token);
+    }
+
+    [Fact]
     public void RabbitMqOptions_HasDefaultValues_MatchingAcceptanceCriteria()
     {
         // Arrange & Act

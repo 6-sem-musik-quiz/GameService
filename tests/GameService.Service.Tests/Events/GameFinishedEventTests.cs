@@ -112,4 +112,96 @@ public class GameFinishedEventTests
         Assert.Equal("TestSpiller", deserialized.Players[0].UserName);
         Assert.Equal(500, deserialized.Players[0].Score);
     }
+
+    [Fact]
+    public void SerializeGameFinished_EmptyPlayersList_ProducesEmptyJsonArray()
+    {
+        // Arrange
+        var gameFinished = new GameFinishedEvent
+        {
+            GameId = Guid.NewGuid(),
+            Rounds = 0,
+            StartTime = DateTime.UtcNow,
+            EndTime = DateTime.UtcNow,
+            CatId = 1,
+            CategoryName = "Empty Lobby",
+            Players = []
+        };
+
+        // Act
+        var json = ResultPublisher.SerializeGameFinished(gameFinished);
+
+        // Assert
+        using var doc = JsonDocument.Parse(json);
+        var players = doc.RootElement.GetProperty("players");
+        Assert.Equal(JsonValueKind.Array, players.ValueKind);
+        Assert.Equal(0, players.GetArrayLength());
+    }
+
+    [Fact]
+    public void SerializeGameFinished_HandlesDanishSpecialCharactersAndEmoji()
+    {
+        // Arrange
+        var gameFinished = new GameFinishedEvent
+        {
+            GameId = Guid.NewGuid(),
+            Rounds = 3,
+            StartTime = DateTime.UtcNow,
+            EndTime = DateTime.UtcNow,
+            CatId = 99,
+            CategoryName = "Danske Klassikere: Kim Larsen & Shu-bi-dua 🎵",
+            Players =
+            [
+                new PlayerGameResult
+                {
+                    UserId = 42,
+                    UserName = "Jørgen Åge Sørensen 🇩🇰",
+                    Score = 300,
+                    CorrectAnswers = 3,
+                    AnsweredRounds = 3,
+                    Placement = 1
+                }
+            ]
+        };
+
+        // Act
+        var json = ResultPublisher.SerializeGameFinished(gameFinished);
+        var roundtripped = JsonSerializer.Deserialize<GameFinishedEvent>(json, new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        });
+
+        // Assert
+        Assert.NotNull(roundtripped);
+        Assert.Equal("Danske Klassikere: Kim Larsen & Shu-bi-dua 🎵", roundtripped.CategoryName);
+        Assert.Equal("Jørgen Åge Sørensen 🇩🇰", roundtripped.Players[0].UserName);
+    }
+
+    [Fact]
+    public void SerializeGameFinished_PreservesIso8601UtcDateTimeFormat()
+    {
+        // Arrange
+        var utcStart = new DateTime(2026, 11, 24, 14, 30, 0, DateTimeKind.Utc);
+        var utcEnd = new DateTime(2026, 11, 24, 14, 45, 0, DateTimeKind.Utc);
+        var game = new GameFinishedEvent
+        {
+            GameId = Guid.NewGuid(),
+            StartTime = utcStart,
+            EndTime = utcEnd,
+            Players = []
+        };
+
+        // Act
+        var json = ResultPublisher.SerializeGameFinished(game);
+
+        // Assert
+        using var doc = JsonDocument.Parse(json);
+        var startTimeStr = doc.RootElement.GetProperty("startTime").GetString();
+        var endTimeStr = doc.RootElement.GetProperty("endTime").GetString();
+
+        Assert.NotNull(startTimeStr);
+        Assert.NotNull(endTimeStr);
+        Assert.Contains("2026-11-24T14:30:00", startTimeStr);
+        Assert.Contains("2026-11-24T14:45:00", endTimeStr);
+    }
 }
