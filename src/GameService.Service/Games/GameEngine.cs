@@ -5,7 +5,7 @@ using GameService.Service.Interfaces;
 
 namespace GameService.Service.Games;
 
-public class GameEngine(IMusicServiceClient musicClient, IGameStore store) : IGameEngine
+public class GameEngine(IMusicServiceClient musicClient, IGameStore store, IGameCoordinator coordinator) : IGameEngine
 {
     public const int MinPlayers = 2;
     public const int MaxPlayers = 8;
@@ -48,6 +48,7 @@ public class GameEngine(IMusicServiceClient musicClient, IGameStore store) : IGa
         };
 
         store.Add(game);
+        coordinator.GameCreated(game); // starts the 15 s join timeout (SCRUM-102)
         return new CreateGameResponse(game.Id);
     }
 
