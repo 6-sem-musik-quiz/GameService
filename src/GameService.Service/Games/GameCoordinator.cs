@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using GameService.Domain.Dtos;
+using GameService.Domain.Events;
 using GameService.Domain.Models;
 using GameService.Service.Exceptions;
 using GameService.Service.Interfaces;
@@ -19,12 +20,15 @@ namespace GameService.Service.Games;
 //         or endsAt + AnswerGraceSeconds
 //     --> RoundEnded with the song and everyone's result
 //     --> PauseBetweenRoundsSeconds, then the next round.
+//   After the last RoundEnded (SCRUM-104): Finished, GameEnded with placements, and the
+//   GameFinished message to StatisticService over RabbitMQ.
 // Each game has its own lock. Messages are sent while it is held, so they reach the group in
 // the order the state changed (Prefetch before the RoundStarted that needs it).
 // All timers come from TimeProvider, so tests control time.
 public sealed class GameCoordinator(
     IGameStore store,
     IGameNotifier notifier,
+    IResultPublisher resultPublisher,
     TimeProvider time,
     IOptions<GameOptions> options,
     ILogger<GameCoordinator> logger,
@@ -57,6 +61,11 @@ public sealed class GameCoordinator(
 
     public void GameCreated(Game game)
     {
+        // Forget games the store has removed (finished more than 30 minutes ago).
+        foreach (var id in _sessions.Keys.Where(id => store.Get(id) is null).ToList())
+            if (_sessions.TryRemove(id, out var old))
+                old.SetTimer(null);
+
         var session = _sessions.GetOrAdd(game.Id, _ => new Session(game));
         session.SetTimer(time.CreateTimer(_ => Fire(() => OnJoinTimeoutAsync(game.Id)), null,
             TimeSpan.FromSeconds(_options.JoinTimeoutSeconds), Timeout.InfiniteTimeSpan));
@@ -343,7 +352,57 @@ public sealed class GameCoordinator(
             session.SetTimer(time.CreateTimer(_ => Fire(() => PrepareRoundAsync(game.Id, next)), null,
                 TimeSpan.FromSeconds(_options.PauseBetweenRoundsSeconds), Timeout.InfiniteTimeSpan));
         }
-        // After the last round the game ends (SCRUM-104).
+        else
+        {
+            await FinishGameLockedAsync(session);
+        }
+    }
+
+    // SCRUM-104: the last round is over. Players get GameEnded even if publishing to RabbitMQ fails.
+    private async Task FinishGameLockedAsync(Session session)
+    {
+        var game = session.Game;
+        if (game.Status == GameStatus.Finished) return;
+
+        game.Status = GameStatus.Finished;
+        game.EndedAt = time.GetUtcNow().UtcDateTime;
+
+        // Highest score first; ties in the order the players were in the lobby.
+        var players = game.Players.OrderByDescending(p => p.Score).ToList();
+        var placements = PlacementCalculator.Calculate(players.Select(p => p.Score).ToList());
+
+        var standings = players.Select((p, i) =>
+            new StandingDto(p.UserId, p.UserName, p.Score, p.Correct, p.Answered, placements[i], Cards(p))).ToList();
+        await SendAsync(() => notifier.GameEndedAsync(game.Id, new GameEndedDto(game.Id, standings)), game.Id);
+
+        // Same message and field names as SCRUM-83/84; StatisticService saves it as is.
+        var finished = new GameFinishedEvent
+        {
+            GameId = game.Id,
+            Rounds = game.Settings.Rounds,
+            StartTime = game.StartedAt ?? game.EndedAt.Value,
+            EndTime = game.EndedAt.Value,
+            CatId = game.Settings.CategoryId,
+            CategoryName = game.Settings.CategoryName,
+            Players = players.Select((p, i) => new PlayerGameResult
+            {
+                UserId = p.UserId,
+                UserName = p.UserName,
+                Score = p.Score,
+                CorrectAnswers = p.Correct,
+                AnsweredRounds = p.Answered,
+                Placement = placements[i]
+            }).ToList()
+        };
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await resultPublisher.PublishGameFinishedAsync(finished, timeout.Token);
+        }
+        catch (Exception e)
+        {
+            logger.LogError(e, "Publishing GameFinished for game {GameId} failed; the result is not in the statistics", game.Id);
+        }
     }
 
     private static List<int> ConnectedPlayers(Session session) =>

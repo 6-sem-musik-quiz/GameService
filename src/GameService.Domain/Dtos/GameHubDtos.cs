@@ -32,6 +32,12 @@ public record RoundEndedDto(int Round, CardDto Song, IReadOnlyList<RoundResultDt
 // slotIndex is null when the player did not answer.
 public record RoundResultDto(int UserId, string UserName, int? SlotIndex, bool Correct, int Score, IReadOnlyList<CardDto> Timeline);
 
+// SCRUM-104: after the last RoundEnded. Standings are sorted by score, highest first.
+public record GameEndedDto(Guid GameId, IReadOnlyList<StandingDto> Standings);
+
+public record StandingDto(int UserId, string UserName, int Score, int Correct, int Answered, int Placement,
+    IReadOnlyList<CardDto> Timeline);
+
 // startsInMs is relative: the client starts a local timer when the message arrives and plays when
 // it runs out. No server timestamps, so a wrong clock on the player's device does not matter.
 // In GameStateDto.CurrentRound (after a reconnect) the values are what is left of the round:
