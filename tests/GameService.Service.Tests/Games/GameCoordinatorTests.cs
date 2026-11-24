@@ -7,6 +7,9 @@ using GameService.Service.Interfaces;
 using GameService.Service.Options;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
+using GameService.Domain.Events;
+using NSubstitute;
+using NSubstitute.ExceptionExtensions;
 using MsOptions = Microsoft.Extensions.Options.Options;
 
 namespace GameService.Service.Tests.Games;
@@ -44,6 +47,12 @@ public class GameCoordinatorTests : IDisposable
             return Task.CompletedTask;
         }
 
+        public Task GameEndedAsync(Guid gameId, GameEndedDto game)
+        {
+            Messages.Add(game);
+            return Task.CompletedTask;
+        }
+
         public List<RoundStartedDto> RoundsStarted => Messages.OfType<RoundStartedDto>().ToList();
         public List<RoundEndedDto> RoundsEnded => Messages.OfType<RoundEndedDto>().ToList();
 
@@ -53,13 +62,14 @@ public class GameCoordinatorTests : IDisposable
 
     private readonly FakeTimeProvider _time = new(new DateTimeOffset(2026, 11, 24, 12, 0, 0, TimeSpan.Zero));
     private readonly RecordingNotifier _notifier = new();
+    private readonly IResultPublisher _publisher = Substitute.For<IResultPublisher>();
     private readonly InMemoryGameStore _store;
     private readonly GameCoordinator _coordinator;
 
     public GameCoordinatorTests()
     {
         _store = new InMemoryGameStore(_time);
-        _coordinator = new GameCoordinator(_store, _notifier, _time, MsOptions.Create(new GameOptions()),
+        _coordinator = new GameCoordinator(_store, _notifier, _publisher, _time, MsOptions.Create(new GameOptions()),
             NullLogger<GameCoordinator>.Instance, new Random(42));
     }
 
@@ -464,6 +474,91 @@ public class GameCoordinatorTests : IDisposable
         await _coordinator.DisconnectedAsync("conn-2");
 
         Assert.Single(_notifier.RoundsEnded);
+    }
+
+    // ---- Game end (SCRUM-104) ----
+
+    // Plays every round. Round r plays year 1970 + r, so "after the last card" is always right
+    // and "before the first card" always wrong. `right` decides per player.
+    private async Task PlayAllRounds(Game game, Func<int, bool> right)
+    {
+        for (var round = 1; round <= game.Settings.Rounds; round++)
+        {
+            await AllReady(game, round);
+            foreach (var player in game.Players)
+                await _coordinator.SubmitAnswerAsync(game.Id, player.UserId, round,
+                    right(player.UserId) ? player.Timeline.Count : 0);
+            PauseBetweenRounds();
+        }
+    }
+
+    [Fact]
+    public async Task GameEnded_IsSentAfterTheLastRoundEnded_WithStandingsSortedByScore()
+    {
+        var game = CreateGame(rounds: 5, players: 3);
+        await StartGame(game);
+
+        await PlayAllRounds(game, userId => userId == Bob); // Bob 5, Alice 0, Carol 0
+
+        Assert.IsType<GameEndedDto>(_notifier.Messages[^1]);
+        Assert.IsType<RoundEndedDto>(_notifier.Messages[^2]);
+        var ended = Assert.Single(_notifier.Messages.OfType<GameEndedDto>());
+        Assert.Equal(game.Id, ended.GameId);
+        Assert.Equal([(Bob, 5, 1), (Alice, 0, 2), (Carol, 0, 2)], ended.Standings.Select(s => (s.UserId, s.Score, s.Placement)));
+        var bob = ended.Standings[0];
+        Assert.Equal((5, 5), (bob.Correct, bob.Answered));
+        Assert.Equal(6, bob.Timeline.Count);
+        Assert.Equal(GameStatus.Finished, game.Status);
+        Assert.Equal(_time.GetUtcNow().AddSeconds(-8).UtcDateTime, game.EndedAt); // ended before the last pause
+        Assert.Equal(5, _notifier.RoundsStarted.Count); // no round 6
+    }
+
+    [Fact]
+    public async Task GameEnded_PublishesGameFinishedOnce_WithTheRightNumbers()
+    {
+        var game = CreateGame(rounds: 5);
+        await StartGame(game);
+        var startedAt = game.StartedAt;
+
+        await PlayAllRounds(game, _ => true); // a tie on first place
+
+        await _publisher.Received(1).PublishGameFinishedAsync(Arg.Is<GameFinishedEvent>(e =>
+            e.GameId == game.Id && e.Rounds == 5 && e.CatId == 1 && e.CategoryName == "80s"
+            && e.StartTime == startedAt && e.EndTime == game.EndedAt
+            && e.Players.Count == 2
+            && e.Players.All(p => p.Score == 5 && p.CorrectAnswers == 5 && p.AnsweredRounds == 5 && p.Placement == 1)
+            && e.Players.Select(p => p.UserName).Order().SequenceEqual(new[] { "p1", "p2" })), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task GameEnded_IsStillSent_WhenPublishingFails()
+    {
+        _publisher.PublishGameFinishedAsync(Arg.Any<GameFinishedEvent>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("RabbitMQ is down"));
+        var game = CreateGame(rounds: 5);
+        await StartGame(game);
+
+        await PlayAllRounds(game, _ => false); // must not throw out of SubmitAnswer
+
+        Assert.Single(_notifier.Messages.OfType<GameEndedDto>());
+        Assert.Equal(GameStatus.Finished, game.Status);
+    }
+
+    [Fact]
+    public async Task UnansweredRounds_CountAsNotAnswered_InTheFinalResult()
+    {
+        var game = CreateGame(rounds: 5);
+        await StartGame(game);
+
+        for (var round = 1; round <= 5; round++)
+        {
+            await AllReady(game, round);
+            _time.Advance(TimeSpan.FromSeconds(34)); // nobody answers; the round times out
+            PauseBetweenRounds();
+        }
+
+        var standings = Assert.Single(_notifier.Messages.OfType<GameEndedDto>()).Standings;
+        Assert.All(standings, s => Assert.Equal((0, 0, 0, 1), (s.Score, s.Correct, s.Answered, s.Placement)));
     }
 
     // ---- What clients see ----

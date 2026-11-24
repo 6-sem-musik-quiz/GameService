@@ -13,6 +13,7 @@ public interface IGameClient
     Task RoundStarted(RoundStartedDto round);
     Task PlayerAnswered(PlayerAnsweredDto answered);
     Task RoundEnded(RoundEndedDto round);
+    Task GameEnded(GameEndedDto game);
 }
 
 // SCRUM-102/103. SignalR hub at /hubs/game, and at /api/hubs/game where the edge forwards
@@ -92,4 +93,7 @@ public class SignalRGameNotifier(IHubContext<GameHub, IGameClient> hub) : IGameN
 
     public Task RoundEndedAsync(Guid gameId, RoundEndedDto round) =>
         hub.Clients.Group(GameHub.GroupName(gameId)).RoundEnded(round);
+
+    public Task GameEndedAsync(Guid gameId, GameEndedDto game) =>
+        hub.Clients.Group(GameHub.GroupName(gameId)).GameEnded(game);
 }

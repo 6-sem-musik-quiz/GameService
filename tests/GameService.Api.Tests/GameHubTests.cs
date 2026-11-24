@@ -27,6 +27,7 @@ public class GameHubTests : IClassFixture<WebApplicationFactory<Program>>, IAsyn
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
 
     private readonly IMusicServiceClient _music = Substitute.For<IMusicServiceClient>();
+    private readonly IResultPublisher _publisher = Substitute.For<IResultPublisher>();
     private readonly WebApplicationFactory<Program> _factory;
     private readonly List<HubConnection> _connections = [];
 
@@ -35,8 +36,17 @@ public class GameHubTests : IClassFixture<WebApplicationFactory<Program>>, IAsyn
         _factory = factory.WithWebHostBuilder(builder =>
         {
             builder.ConfigureAppConfiguration((_, config) =>
-                config.AddInMemoryCollection(new Dictionary<string, string?> { ["Jwt:SigningKey"] = SigningKey }));
-            builder.ConfigureServices(services => services.AddScoped(_ => _music));
+                config.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Jwt:SigningKey"] = SigningKey,
+                    ["Game:PauseBetweenRoundsSeconds"] = "0", // so a whole game runs in a test
+                    ["Game:StartDelayMs"] = "0"
+                }));
+            builder.ConfigureServices(services =>
+            {
+                services.AddScoped(_ => _music);
+                services.AddSingleton(_publisher); // no RabbitMQ in tests
+            });
         });
         _music.GetRandomSongsAsync(Arg.Any<int>(), Arg.Any<int>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
             .Returns(call => Enumerable.Range(0, call.ArgAt<int>(1)).Select(i => new Song
@@ -142,7 +152,7 @@ public class GameHubTests : IClassFixture<WebApplicationFactory<Program>>, IAsyn
         Assert.Equal(started, await bobRound.Task.WaitAsync(Timeout));
         Assert.Equal(1, started.Round);
         Assert.Equal(5, started.TotalRounds);
-        Assert.Equal(3000, started.StartsInMs);
+        Assert.Equal(0, started.StartsInMs); // Game:StartDelayMs is 0 in these tests (default 3000)
         Assert.Equal(15, started.AnswerTimeSeconds);
         Assert.InRange(started.StartOffsetSeconds, 0, 180 - 15);
     }
@@ -178,6 +188,36 @@ public class GameHubTests : IClassFixture<WebApplicationFactory<Program>>, IAsyn
 
         var error = await Assert.ThrowsAsync<HubException>(() => alice.InvokeAsync("SubmitAnswer", gameId, 1, 0));
         Assert.Contains("not being played", error.Message);
+    }
+
+    [Fact]
+    public async Task AWholeGame_EndsWithGameEnded_AndPublishesGameFinishedOnce()
+    {
+        var gameId = await CreateGame(51, 52);
+        var alice = ConnectionFor(Token(51, "alice"));
+        var bob = ConnectionFor(Token(52, "bob"));
+        var started = System.Threading.Channels.Channel.CreateUnbounded<RoundStartedDto>();
+        alice.On<RoundStartedDto>("RoundStarted", r => started.Writer.TryWrite(r));
+        var gameEnded = Listen<GameEndedDto>(bob, "GameEnded");
+        await alice.StartAsync();
+        await bob.StartAsync();
+        await alice.InvokeAsync<GameStateDto>("JoinGame", gameId);
+        await bob.InvokeAsync<GameStateDto>("JoinGame", gameId);
+
+        var aliceCards = 1;
+        for (var round = 1; round <= 5; round++)
+        {
+            await alice.InvokeAsync("Ready", gameId, round);
+            await bob.InvokeAsync("Ready", gameId, round);
+            Assert.Equal(round, (await started.Reader.ReadAsync().AsTask().WaitAsync(Timeout)).Round);
+            await alice.InvokeAsync("SubmitAnswer", gameId, round, aliceCards++); // after the last card: always right
+            await bob.InvokeAsync("SubmitAnswer", gameId, round, 0);              // before the first: always wrong
+        }
+
+        var ended = await gameEnded.Task.WaitAsync(Timeout);
+        Assert.Equal([(51, 5, 1), (52, 0, 2)], ended.Standings.Select(s => (s.UserId, s.Score, s.Placement)));
+        await _publisher.Received(1).PublishGameFinishedAsync(
+            Arg.Is<GameService.Domain.Events.GameFinishedEvent>(e => e.GameId == gameId && e.Players.Count == 2), Arg.Any<CancellationToken>());
     }
 
     [Fact]

@@ -11,6 +11,7 @@ public interface IGameNotifier
     Task RoundStartedAsync(Guid gameId, RoundStartedDto round);
     Task PlayerAnsweredAsync(Guid gameId, PlayerAnsweredDto answered);
     Task RoundEndedAsync(Guid gameId, RoundEndedDto round);
+    Task GameEndedAsync(Guid gameId, GameEndedDto game);
 }
 
 // Runs a game in real time: who is connected, when the game and each round start (SCRUM-102).

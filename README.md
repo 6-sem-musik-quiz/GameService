@@ -70,6 +70,7 @@ The hub needs a JWT; browsers send it as `?access_token=`. Through the edge it i
 | client → server | `SubmitAnswer(gameId, round, slotIndex)` | `slotIndex` 0..n in the caller's timeline (0 = before the first card, n = after the last). Rejected if the round is not the current one, the time is up, the player already answered or the slot is out of range. |
 | server → group | `PlayerAnswered({ userId })` | Someone answered; the answer stays hidden. |
 | server → group | `RoundEnded({ round, song: { title, artists, year }, results: [{ userId, userName, slotIndex?, correct, score, timeline }] })` | When every connected player has answered, or at `endsAt + 1 s`. |
+| server → group | `GameEnded({ gameId, standings: [{ userId, userName, score, correct, answered, placement, timeline }] })` | Right after the last `RoundEnded`. Sorted by score; equal scores share a placement (1, 1, 3). |
 
 - The game starts when every player has called `JoinGame`, or `Game:JoinTimeoutSeconds` (15) after it was created.
 - A round starts when every **connected** player has sent `Ready`, or after `Game:ReadyTimeoutSeconds` (10).
@@ -80,6 +81,10 @@ The hub needs a JWT; browsers send it as `?access_token=`. Through the edge it i
   no answer does not count as answered. Answers are judged when the round ends, so nobody's timeline
   reveals the song early.
 - The next round is prepared `Game:PauseBetweenRoundsSeconds` (8) after `RoundEnded`.
+- **Game end:** after the last round the game is `Finished`, `GameEnded` goes to the players, and
+  `GameFinished` is published once to RabbitMQ (exchange `game-events`, routing key `game.finished.v1`)
+  for StatisticService. The message keeps the SCRUM-83 field names (`catId`, `startTime`, `endTime`,
+  `correctAnswers`, `answeredRounds`, `placement`, ...). If publishing fails it is logged; players still get `GameEnded`.
 
 | Setting | Default | |
 |---|---|---|
