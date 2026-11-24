@@ -41,8 +41,8 @@ dotnet run --project src/GameService.Api
 
 `POST /api/games` (called by LobbyService, requires a JWT) with
 `{ lobbyId, categoryId, categoryName, rounds, answerTimeSeconds, players: [{ userId, userName }] }`
-returns `201 { gameId }`. `400` on invalid input (2-8 players, unique userIds, rounds and
-answerTimeSeconds > 0), `401` without a valid token, `502` if MusicService fails or returns too few songs.
+returns `201 { gameId }`. `400` on invalid input (2-8 players, unique userIds, rounds in {5, 10, 15, 20}
+and answerTimeSeconds in {15, 30, 45, 60}, the same choices as the lobby), `401` without a valid token, `502` if MusicService fails or returns too few songs.
 
 GameService fetches `rounds + 1` songs from MusicService (`GET /api/playlists/{categoryId}/songs/random?count=rounds+1`)
 with the forwarded token. The first song is the shared start card in every player's timeline; the rest are one per round.

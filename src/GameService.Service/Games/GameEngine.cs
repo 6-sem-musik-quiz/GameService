@@ -10,6 +10,10 @@ public class GameEngine(IMusicServiceClient musicClient, IGameStore store) : IGa
     public const int MinPlayers = 2;
     public const int MaxPlayers = 8;
 
+    // The same choices LobbyService offers (LobbyManager.AllowedRounds / AllowedAnswerTimes).
+    public static readonly IReadOnlySet<int> AllowedRounds = new HashSet<int> { 5, 10, 15, 20 };
+    public static readonly IReadOnlySet<int> AllowedAnswerTimes = new HashSet<int> { 15, 30, 45, 60 };
+
     public async Task<CreateGameResponse> CreateGameAsync(CreateGameRequest request, string? bearerToken, CancellationToken cancellationToken = default)
     {
         Validate(request);
@@ -53,8 +57,10 @@ public class GameEngine(IMusicServiceClient musicClient, IGameStore store) : IGa
         if (request.LobbyId == Guid.Empty) throw new GameValidationException("lobbyId is required.");
         if (request.CategoryId <= 0) throw new GameValidationException("categoryId must be positive.");
         if (string.IsNullOrWhiteSpace(request.CategoryName)) throw new GameValidationException("categoryName is required.");
-        if (request.Rounds <= 0) throw new GameValidationException("rounds must be greater than 0.");
-        if (request.AnswerTimeSeconds <= 0) throw new GameValidationException("answerTimeSeconds must be greater than 0.");
+        if (!AllowedRounds.Contains(request.Rounds))
+            throw new GameValidationException($"rounds must be one of {string.Join(", ", AllowedRounds.Order())}.");
+        if (!AllowedAnswerTimes.Contains(request.AnswerTimeSeconds))
+            throw new GameValidationException($"answerTimeSeconds must be one of {string.Join(", ", AllowedAnswerTimes.Order())}.");
 
         var players = request.Players;
         if (players is null || players.Count < MinPlayers || players.Count > MaxPlayers)

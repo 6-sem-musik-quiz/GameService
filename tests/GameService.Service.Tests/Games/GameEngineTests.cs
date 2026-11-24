@@ -17,7 +17,7 @@ public class GameEngineTests
     public GameEngineTests() => _engine = new GameEngine(_music, _store);
 
     private static List<Song> Songs(int n) =>
-        Enumerable.Range(1, n).Select(i => new Song { Id = $"s{i}", Title = $"T{i}", Artist = "A", Year = 1960 + i }).ToList();
+        Enumerable.Range(1, n).Select(i => new Song { Id = i, Title = $"T{i}", Artists = ["A"], Year = 1960 + i }).ToList();
 
     private static CreateGameRequest Request(int players = 3, int rounds = 5) => new()
     {
@@ -25,7 +25,7 @@ public class GameEngineTests
         CategoryId = 7,
         CategoryName = "80s",
         Rounds = rounds,
-        AnswerTimeSeconds = 20,
+        AnswerTimeSeconds = 30,
         Players = Enumerable.Range(1, players).Select(i => new PlayerDto { UserId = i, UserName = $"p{i}" }).ToList()
     };
 
@@ -42,7 +42,7 @@ public class GameEngineTests
         Assert.All(game.Players, p =>
         {
             var card = Assert.Single(p.Timeline);
-            Assert.Equal("s1", card.Song.Id);
+            Assert.Equal(1, card.Song.Id);
             Assert.Equal(0, p.Score);
         });
     }
@@ -83,15 +83,35 @@ public class GameEngineTests
     }
 
     [Theory]
-    [InlineData(0, 20)]
-    [InlineData(-1, 20)]
+    [InlineData(0, 30)]
+    [InlineData(-1, 30)]
+    [InlineData(7, 30)]   // not a lobby choice
+    [InlineData(25, 30)]
     [InlineData(5, 0)]
+    [InlineData(5, 20)]   // not a lobby choice
+    [InlineData(5, 120)]
     public async Task CreateGame_InvalidRoundsOrAnswerTime_Throws(int rounds, int answerTime)
     {
         var request = Request(rounds: rounds);
         request.AnswerTimeSeconds = answerTime;
 
         await Assert.ThrowsAsync<GameValidationException>(() => _engine.CreateGameAsync(request, "tok"));
+    }
+
+    [Theory]
+    [InlineData(5, 15)]
+    [InlineData(10, 30)]
+    [InlineData(15, 45)]
+    [InlineData(20, 60)]
+    public async Task CreateGame_AllLobbySettings_AreAccepted(int rounds, int answerTime)
+    {
+        _music.GetRandomSongsAsync(7, rounds + 1, "tok", Arg.Any<CancellationToken>()).Returns(Songs(rounds + 1));
+        var request = Request(rounds: rounds);
+        request.AnswerTimeSeconds = answerTime;
+
+        var response = await _engine.CreateGameAsync(request, "tok");
+
+        Assert.Equal(rounds + 1, _store.Get(response.GameId)!.Songs.Count);
     }
 
     [Fact]

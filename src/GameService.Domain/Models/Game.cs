@@ -46,13 +46,14 @@ public class TimelineCard
     public int Year => Song.Year;
 }
 
-// Shape of a song as returned by MusicService (GET /api/playlists/{categoryId}/songs/random).
+// Same shape as MusicService's SongDto (GET /api/playlists/{categoryId}/songs/random).
+// AudioUrl is the public CDN address of the whole mp3.
 public class Song
 {
-    public string Id { get; set; } = string.Empty;
+    public int Id { get; set; }
     public string Title { get; set; } = string.Empty;
-    public string Artist { get; set; } = string.Empty;
+    public List<string> Artists { get; set; } = [];
     public int Year { get; set; }
-    public string? PreviewUrl { get; set; }
     public int DurationSeconds { get; set; }
+    public string AudioUrl { get; set; } = string.Empty;
 }
