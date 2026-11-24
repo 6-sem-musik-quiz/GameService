@@ -148,6 +148,39 @@ public class GameHubTests : IClassFixture<WebApplicationFactory<Program>>, IAsyn
     }
 
     [Fact]
+    public async Task BothPlayersAnswer_EveryoneGetsPlayerAnswered_ThenRoundEnded()
+    {
+        var gameId = await CreateGame(41, 42);
+        var alice = ConnectionFor(Token(41, "alice"));
+        var bob = ConnectionFor(Token(42, "bob"));
+        var answered = new List<PlayerAnsweredDto>();
+        alice.On<PlayerAnsweredDto>("PlayerAnswered", a => { lock (answered) answered.Add(a); });
+        var started = Listen<RoundStartedDto>(alice, "RoundStarted");
+        var aliceEnded = Listen<RoundEndedDto>(alice, "RoundEnded");
+        var bobEnded = Listen<RoundEndedDto>(bob, "RoundEnded");
+        await alice.StartAsync();
+        await bob.StartAsync();
+        await alice.InvokeAsync<GameStateDto>("JoinGame", gameId);
+        await bob.InvokeAsync<GameStateDto>("JoinGame", gameId);
+        await alice.InvokeAsync("Ready", gameId, 1);
+        await bob.InvokeAsync("Ready", gameId, 1);
+        await started.Task.WaitAsync(Timeout);
+
+        await alice.InvokeAsync("SubmitAnswer", gameId, 1, 1); // Song 1 (1971) after the start card (1970): right
+        await bob.InvokeAsync("SubmitAnswer", gameId, 1, 0);   // before it: wrong
+
+        var ended = await aliceEnded.Task.WaitAsync(Timeout);
+        Assert.Equal(ended.Round, (await bobEnded.Task.WaitAsync(Timeout)).Round);
+        Assert.Equal(("Song 1", 1971), (ended.Song.Title, ended.Song.Year));
+        Assert.True(ended.Results.Single(r => r.UserId == 41).Correct);
+        Assert.False(ended.Results.Single(r => r.UserId == 42).Correct);
+        lock (answered) Assert.Equal([41, 42], answered.Select(a => a.UserId).Order());
+
+        var error = await Assert.ThrowsAsync<HubException>(() => alice.InvokeAsync("SubmitAnswer", gameId, 1, 0));
+        Assert.Contains("not being played", error.Message);
+    }
+
+    [Fact]
     public async Task RoundStarted_OnTheWire_HasNoSongInformation()
     {
         var gameId = await CreateGame(21, 22);

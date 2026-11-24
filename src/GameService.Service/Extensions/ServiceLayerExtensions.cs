@@ -45,6 +45,8 @@ public static class ServiceLayerExtensions
             if (int.TryParse(game["ReadyTimeoutSeconds"], out var ready)) options.ReadyTimeoutSeconds = ready;
             if (int.TryParse(game["StartDelayMs"], out var delay)) options.StartDelayMs = delay;
             if (int.TryParse(game["PrefetchWindow"], out var window)) options.PrefetchWindow = window;
+            if (int.TryParse(game["AnswerGraceSeconds"], out var grace)) options.AnswerGraceSeconds = grace;
+            if (int.TryParse(game["PauseBetweenRoundsSeconds"], out var pause)) options.PauseBetweenRoundsSeconds = pause;
         });
 
         services.AddSingleton(TimeProvider.System);

@@ -23,6 +23,15 @@ public record CardDto(string Title, IReadOnlyList<string> Artists, int Year);
 
 public record PrefetchDto(int Round, string AudioUrl);
 
+// SCRUM-103: someone answered. Does not reveal the answer.
+public record PlayerAnsweredDto(int UserId);
+
+// SCRUM-103: the round is over. Reveals the song and everyone's answer and timeline.
+public record RoundEndedDto(int Round, CardDto Song, IReadOnlyList<RoundResultDto> Results);
+
+// slotIndex is null when the player did not answer.
+public record RoundResultDto(int UserId, string UserName, int? SlotIndex, bool Correct, int Score, IReadOnlyList<CardDto> Timeline);
+
 // startsInMs is relative: the client starts a local timer when the message arrives and plays when
 // it runs out. No server timestamps, so a wrong clock on the player's device does not matter.
 // In GameStateDto.CurrentRound (after a reconnect) the values are what is left of the round:

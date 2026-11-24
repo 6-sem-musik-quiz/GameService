@@ -11,9 +11,11 @@ public interface IGameClient
 {
     Task Prefetch(IReadOnlyList<PrefetchDto> files);
     Task RoundStarted(RoundStartedDto round);
+    Task PlayerAnswered(PlayerAnsweredDto answered);
+    Task RoundEnded(RoundEndedDto round);
 }
 
-// SCRUM-102. SignalR hub at /hubs/game, and at /api/hubs/game where the edge forwards
+// SCRUM-102/103. SignalR hub at /hubs/game, and at /api/hubs/game where the edge forwards
 // /api/gameservice/hubs/game. Requires a JWT; browsers send it as ?access_token=.
 // The game logic lives in IGameCoordinator; this class only maps the user and errors.
 [Authorize]
@@ -36,6 +38,17 @@ public class GameHub(IGameCoordinator coordinator) : Hub<IGameClient>
         await Run(async () =>
         {
             await coordinator.ReadyAsync(gameId, userId, round);
+            return 0;
+        });
+    }
+
+    // SCRUM-103: places the round's song at slotIndex in the caller's timeline.
+    public async Task SubmitAnswer(Guid gameId, int round, int slotIndex)
+    {
+        var userId = UserId();
+        await Run(async () =>
+        {
+            await coordinator.SubmitAnswerAsync(gameId, userId, round, slotIndex);
             return 0;
         });
     }
@@ -73,4 +86,10 @@ public class SignalRGameNotifier(IHubContext<GameHub, IGameClient> hub) : IGameN
 
     public Task RoundStartedAsync(Guid gameId, RoundStartedDto round) =>
         hub.Clients.Group(GameHub.GroupName(gameId)).RoundStarted(round);
+
+    public Task PlayerAnsweredAsync(Guid gameId, PlayerAnsweredDto answered) =>
+        hub.Clients.Group(GameHub.GroupName(gameId)).PlayerAnswered(answered);
+
+    public Task RoundEndedAsync(Guid gameId, RoundEndedDto round) =>
+        hub.Clients.Group(GameHub.GroupName(gameId)).RoundEnded(round);
 }

@@ -14,6 +14,13 @@ public class GameOptions
     // RoundStarted.startsInMs: how long clients wait before they play.
     public int StartDelayMs { get; set; } = 3000;
 
+    // Answers that arrive this long after the answer time still count (network delay).
+    // The round ends at endsAt + this, unless everyone has answered earlier.
+    public int AnswerGraceSeconds { get; set; } = 1;
+
+    // The next round is prepared this long after RoundEnded.
+    public int PauseBetweenRoundsSeconds { get; set; } = 8;
+
     // How many rounds ahead the clients download (rounds 1-5 at the start, k+5 when round k starts).
     public int PrefetchWindow { get; set; } = 5;
 }

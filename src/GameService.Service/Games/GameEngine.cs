@@ -52,6 +52,17 @@ public class GameEngine(IMusicServiceClient musicClient, IGameStore store, IGame
         return new CreateGameResponse(game.Id);
     }
 
+    // SCRUM-103: is `year` in the right place if put at slotIndex in a timeline sorted by year?
+    // slotIndex 0 = before the first card, n = after the last, i = between card i-1 and card i.
+    // The same year counts as right on both sides.
+    public static bool IsCorrectPlacement(IReadOnlyList<TimelineCard> timeline, int slotIndex, int year)
+    {
+        if (slotIndex < 0 || slotIndex > timeline.Count) return false;
+        var afterPrevious = slotIndex == 0 || timeline[slotIndex - 1].Year <= year;
+        var beforeNext = slotIndex == timeline.Count || year <= timeline[slotIndex].Year;
+        return afterPrevious && beforeNext;
+    }
+
     private static void Validate(CreateGameRequest? request)
     {
         if (request is null) throw new GameValidationException("Request body is required.");
