@@ -39,6 +39,9 @@ public sealed class GameCoordinator(
     private readonly ConcurrentDictionary<Guid, Session> _sessions = new();
     private readonly ConcurrentDictionary<string, (Guid GameId, int UserId)> _connections = new();
 
+    // Order is 1 for the first answer of the round, 2 for the next, and so on.
+    private sealed record Answer(int Slot, int AfterMs, int Order);
+
     private sealed class Session(Game game)
     {
         public Game Game { get; } = game;
@@ -46,8 +49,8 @@ public sealed class GameCoordinator(
         public HashSet<int> Joined { get; } = [];
         public Dictionary<int, HashSet<string>> Connections { get; } = [];
         public Dictionary<int, HashSet<int>> Ready { get; } = [];
-        // Answers for the active round: userId -> slotIndex. Judged when the round ends.
-        public Dictionary<int, int> Answers { get; } = [];
+        // Answers for the active round, by userId. Judged when the round ends.
+        public Dictionary<int, Answer> Answers { get; } = [];
         // The round the server is waiting for Ready for; 0 when it is not waiting.
         public int PreparingRound { get; set; }
         public ITimer? Timer { get; set; }
@@ -141,8 +144,9 @@ public sealed class GameCoordinator(
             if (slotIndex < 0 || slotIndex > player.Timeline.Count)
                 throw new GameRuleException($"slotIndex must be between 0 and {player.Timeline.Count}.");
 
-            session.Answers[userId] = slotIndex;
-            await SendAsync(() => notifier.PlayerAnsweredAsync(gameId, new PlayerAnsweredDto(userId)), gameId);
+            var afterMs = AnsweredAfterMs(active, session.Game.Settings.AnswerTimeSeconds);
+            session.Answers[userId] = new Answer(slotIndex, afterMs, session.Answers.Count + 1);
+            await SendAsync(() => notifier.PlayerAnsweredAsync(gameId, new PlayerAnsweredDto(userId, afterMs)), gameId);
 
             if (ConnectedPlayers(session).All(session.Answers.ContainsKey))
                 await EndRoundLockedAsync(session);
@@ -329,8 +333,11 @@ public sealed class GameCoordinator(
         var results = new List<RoundResultDto>();
         foreach (var player in game.Players)
         {
-            int? slot = session.Answers.TryGetValue(player.UserId, out var s) ? s : null;
+            var answer = session.Answers.GetValueOrDefault(player.UserId);
+            int? slot = answer?.Slot;
             var correct = slot is { } index && GameEngine.IsCorrectPlacement(player.Timeline, index, song.Year);
+            // The range is read before this round's card goes in.
+            var range = slot is { } at ? RangeOf(player.Timeline, at) : null;
             if (slot is not null)
                 player.Answered++;
             if (correct)
@@ -339,7 +346,9 @@ public sealed class GameCoordinator(
                 player.Score++;
                 player.Correct++;
             }
-            results.Add(new RoundResultDto(player.UserId, player.UserName, slot, correct, player.Score, Cards(player)));
+            player.History.Add(new RoundHistory { Round = active.Round, Correct = correct, AnsweredAfterMs = answer?.AfterMs });
+            results.Add(new RoundResultDto(player.UserId, player.UserName, slot, correct, player.Score, Cards(player),
+                answer?.AfterMs, range));
         }
         session.Answers.Clear();
 
@@ -405,6 +414,20 @@ public sealed class GameCoordinator(
         }
     }
 
+    // Milliseconds from playback start to now, clamped to [0, answer time].
+    private int AnsweredAfterMs(ActiveRound round, int answerTimeSeconds)
+    {
+        var ms = (time.GetUtcNow() - round.PlaybackStartsAt).TotalMilliseconds;
+        return (int)Math.Clamp(Math.Round(ms), 0, answerTimeSeconds * 1000);
+    }
+
+    // [from, to]: the years of the cards on either side of the slot; null for an open end.
+    private static IReadOnlyList<int?> RangeOf(List<TimelineCard> timeline, int slot) =>
+    [
+        slot > 0 ? timeline[slot - 1].Year : null,
+        slot < timeline.Count ? timeline[slot].Year : null
+    ];
+
     private static List<int> ConnectedPlayers(Session session) =>
         session.Connections.Where(c => c.Value.Count > 0).Select(c => c.Key).ToList();
 
@@ -435,15 +458,29 @@ public sealed class GameCoordinator(
             ? []
             : PrefetchFor(game, RoundTiming.Rounds(firstNeeded, game.CurrentRound + _options.PrefetchWindow, game.Settings.Rounds));
 
+        // Only rounds that have ended: a round still in its grace second (ActiveRound set) is not.
+        var lastEnded = game.ActiveRound is null ? game.CurrentRound : game.CurrentRound - 1;
+        var pastSongs = Enumerable.Range(1, Math.Max(0, lastEnded))
+            .Select(r => new PastSongDto(r, ToCard(game.SongForRound(r))))
+            .ToList();
+
         return new GameStateDto(
             game.Id,
             new GameSettingsDto(game.Settings.CategoryId, game.Settings.CategoryName, game.Settings.Rounds, game.Settings.AnswerTimeSeconds),
             game.CurrentRound,
             game.Settings.Rounds,
-            game.Players.Select(p => new PlayerSummaryDto(p.UserId, p.UserName, p.Score)).ToList(),
+            game.Players.Select(p => new PlayerSummaryDto(
+                p.UserId,
+                p.UserName,
+                p.Score,
+                Cards(p),
+                p.History.Select(h => new RoundHistoryDto(h.Round, h.Correct, h.AnsweredAfterMs)).ToList(),
+                game.ActiveRound is not null && session.Answers.TryGetValue(p.UserId, out var answer) ? answer.Order : null))
+                .ToList(),
             Cards(me),
             prefetch,
-            active is null ? null : RemainingOf(active, game, now));
+            active is null ? null : RemainingOf(active, game, now),
+            pastSongs);
     }
 
     // What is left of a round that is being played, for a player who (re)joins in the middle of it.

@@ -63,13 +63,13 @@ The hub needs a JWT; browsers send it as `?access_token=`. Through the edge it i
 
 | Direction | Message | |
 |---|---|---|
-| client → server | `JoinGame(gameId)` → `GameStateDto` | Only players in the game. Joins group `game:{id}`. Call again after a reconnect: the state has the files to have ready (`prefetch`) and what is left of a running round (`currentRound`). |
+| client → server | `JoinGame(gameId)` → `GameStateDto` | Only players in the game. Joins group `game:{id}`. Call again after a reconnect: the state has the files to have ready (`prefetch`), what is left of a running round (`currentRound`), every player's `timeline`, `history: [{ round, correct, answeredAfterMs? }]` and `answeredOrder?` for the running round, and `pastSongs: [{ round, song }]` (SCRUM-150). |
 | client → server | `Ready(gameId, round)` | The file for the round is downloaded. May be sent before the round is next. |
 | server → group | `Prefetch([{ round, audioUrl }])` | Rounds 1-5 when the game starts, then round k+5 when round k starts. |
 | server → group | `RoundStarted({ round, totalRounds, startsInMs, startOffsetSeconds, answerTimeSeconds })` | No song info. Clients play after `startsInMs` from `startOffsetSeconds`. |
 | client → server | `SubmitAnswer(gameId, round, slotIndex)` | `slotIndex` 0..n in the caller's timeline (0 = before the first card, n = after the last). Rejected if the round is not the current one, the time is up, the player already answered or the slot is out of range. |
-| server → group | `PlayerAnswered({ userId })` | Someone answered; the answer stays hidden. |
-| server → group | `RoundEnded({ round, song: { title, artists, year }, results: [{ userId, userName, slotIndex?, correct, score, timeline }] })` | When every connected player has answered, or at `endsAt + 1 s`. |
+| server → group | `PlayerAnswered({ userId, answeredAfterMs })` | Someone answered; the answer stays hidden. `answeredAfterMs` is measured by the server from playback start, clamped to the answer time. |
+| server → group | `RoundEnded({ round, song: { title, artists, year }, results: [{ userId, userName, slotIndex?, correct, score, timeline, answeredAfterMs?, range? }] })` | When every connected player has answered, or at `endsAt + 1 s`. `range` = `[from, to]`, the years the answer was put between (`null` for an open end). |
 | server → group | `GameEnded({ gameId, standings: [{ userId, userName, score, correct, answered, placement, timeline }] })` | Right after the last `RoundEnded`. Sorted by score; equal scores share a placement (1, 1, 3). |
 
 - The game starts when every player has called `JoinGame`, or `Game:JoinTimeoutSeconds` (15) after it was created.
