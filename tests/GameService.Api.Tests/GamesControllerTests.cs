@@ -57,19 +57,19 @@ public class GamesControllerTests : IClassFixture<WebApplicationFactory<Program>
         LobbyId = Guid.NewGuid(),
         CategoryId = 3,
         CategoryName = "Rock",
-        Rounds = 2,
+        Rounds = 5,
         AnswerTimeSeconds = 15,
         Players = Enumerable.Range(1, players).Select(i => new PlayerDto { UserId = i, UserName = $"p{i}" }).ToList()
     };
 
     private static List<Song> Songs(int n) =>
-        Enumerable.Range(1, n).Select(i => new Song { Id = $"s{i}", Year = 1970 + i }).ToList();
+        Enumerable.Range(1, n).Select(i => new Song { Id = i, Year = 1970 + i }).ToList();
 
     [Fact]
     public async Task Post_ValidRequest_Returns201WithGameId_AndForwardsToken()
     {
         var token = Token();
-        _music.GetRandomSongsAsync(3, 3, token, Arg.Any<CancellationToken>()).Returns(Songs(3));
+        _music.GetRandomSongsAsync(3, 6, token, Arg.Any<CancellationToken>()).Returns(Songs(6));
 
         var response = await Client(token).PostAsJsonAsync("/api/games", Body());
 
@@ -82,6 +82,20 @@ public class GamesControllerTests : IClassFixture<WebApplicationFactory<Program>
     public async Task Post_TooManyPlayers_Returns400()
     {
         var response = await Client(Token()).PostAsJsonAsync("/api/games", Body(9));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(7, 15)]
+    [InlineData(5, 20)]
+    public async Task Post_SettingsNotAllowedInLobby_Returns400(int rounds, int answerTime)
+    {
+        var body = Body();
+        body.Rounds = rounds;
+        body.AnswerTimeSeconds = answerTime;
+
+        var response = await Client(Token()).PostAsJsonAsync("/api/games", body);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
