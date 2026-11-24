@@ -1,5 +1,7 @@
 using System.Text;
+using GameService.Api.Hubs;
 using GameService.Api.Middleware;
+using GameService.Service.Interfaces;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using GameService.Repository.Extensions;
@@ -32,8 +34,24 @@ builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationSc
             IssuerSigningKey = string.IsNullOrEmpty(key) ? null : new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key)),
             ValidateLifetime = true
         };
+        // Browsers cannot set headers on WebSockets, so the hub takes the token from ?access_token=.
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                var accessToken = context.Request.Query["access_token"];
+                var path = context.HttpContext.Request.Path;
+                if (!string.IsNullOrEmpty(accessToken)
+                    && (path.StartsWithSegments(GameHub.Path) || path.StartsWithSegments(GameHub.EdgePath)))
+                    context.Token = accessToken;
+                return Task.CompletedTask;
+            }
+        };
     });
 builder.Services.AddAuthorization();
+
+builder.Services.AddSignalR();
+builder.Services.AddSingleton<IGameNotifier, SignalRGameNotifier>();
 
 builder.Services.AddRepositoryLayer();
 builder.Services.AddServiceLayer(builder.Configuration);
@@ -52,6 +70,9 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+// The edge forwards /api/gameservice/hubs/game as /api/hubs/game, so the hub is mapped there too.
+app.MapHub<GameHub>(GameHub.Path);
+app.MapHub<GameHub>(GameHub.EdgePath);
 app.MapHealthChecks("/health");
 
 app.Run();

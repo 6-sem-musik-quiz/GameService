@@ -12,9 +12,20 @@ public class GameEngineTests
 {
     private readonly IMusicServiceClient _music = Substitute.For<IMusicServiceClient>();
     private readonly InMemoryGameStore _store = new(TimeProvider.System);
+    private readonly IGameCoordinator _coordinator = Substitute.For<IGameCoordinator>();
     private readonly GameEngine _engine;
 
-    public GameEngineTests() => _engine = new GameEngine(_music, _store);
+    public GameEngineTests() => _engine = new GameEngine(_music, _store, _coordinator);
+
+    [Fact]
+    public async Task CreateGame_TellsTheCoordinator_SoTheJoinTimeoutStarts()
+    {
+        _music.GetRandomSongsAsync(7, 6, "tok", Arg.Any<CancellationToken>()).Returns(Songs(6));
+
+        var response = await _engine.CreateGameAsync(Request(), "tok");
+
+        _coordinator.Received(1).GameCreated(Arg.Is<Game>(g => g.Id == response.GameId));
+    }
 
     private static List<Song> Songs(int n) =>
         Enumerable.Range(1, n).Select(i => new Song { Id = i, Title = $"T{i}", Artists = ["A"], Year = 1960 + i }).ToList();

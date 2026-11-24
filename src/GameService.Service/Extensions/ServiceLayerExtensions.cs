@@ -38,8 +38,19 @@ public static class ServiceLayerExtensions
 
         services.AddSingleton<IResultPublisher, ResultPublisher>();
 
+        var game = configuration.GetSection(GameOptions.SectionName);
+        services.Configure<GameOptions>(options =>
+        {
+            if (int.TryParse(game["JoinTimeoutSeconds"], out var join)) options.JoinTimeoutSeconds = join;
+            if (int.TryParse(game["ReadyTimeoutSeconds"], out var ready)) options.ReadyTimeoutSeconds = ready;
+            if (int.TryParse(game["StartDelayMs"], out var delay)) options.StartDelayMs = delay;
+            if (int.TryParse(game["PrefetchWindow"], out var window)) options.PrefetchWindow = window;
+        });
+
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton<IGameStore, InMemoryGameStore>();
+        // Needs an IGameNotifier, which the Api project registers (SignalR).
+        services.AddSingleton<IGameCoordinator, GameCoordinator>();
         services.AddScoped<IGameEngine, GameEngine>();
         services.AddHttpClient<IMusicServiceClient, MusicServiceClient>((sp, client) =>
         {

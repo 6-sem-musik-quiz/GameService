@@ -56,6 +56,31 @@ with the forwarded token. The first song is the shared start card in every playe
 **State is in memory** (`IGameStore`, no database), so **only one GameService instance is supported**.
 Finished games are removed 30 minutes after they end.
 
+## Playing a game (SignalR, `/hubs/game`)
+
+The hub needs a JWT; browsers send it as `?access_token=`. Through the edge it is
+`https://quiz.munkcloud.dk/api/gameservice/hubs/game` (the edge forwards it as `/api/hubs/game`, which is mapped too).
+
+| Direction | Message | |
+|---|---|---|
+| client → server | `JoinGame(gameId)` → `GameStateDto` | Only players in the game. Joins group `game:{id}`. Call again after a reconnect: the state has the files to have ready (`prefetch`) and what is left of a running round (`currentRound`). |
+| client → server | `Ready(gameId, round)` | The file for the round is downloaded. May be sent before the round is next. |
+| server → group | `Prefetch([{ round, audioUrl }])` | Rounds 1-5 when the game starts, then round k+5 when round k starts. |
+| server → group | `RoundStarted({ round, totalRounds, startsInMs, startOffsetSeconds, answerTimeSeconds })` | No song info. Clients play after `startsInMs` from `startOffsetSeconds`. |
+
+- The game starts when every player has called `JoinGame`, or `Game:JoinTimeoutSeconds` (15) after it was created.
+- A round starts when every **connected** player has sent `Ready`, or after `Game:ReadyTimeoutSeconds` (10).
+- `startOffsetSeconds` is random in `[0, max(0, duration - answerTime)]`. The server keeps
+  `endsAt = now + startsInMs + answerTime` to reject late answers (SCRUM-103).
+- Ending a round and starting the next is SCRUM-103: it calls `IGameCoordinator.PrepareRoundAsync(gameId, round + 1)`.
+
+| Setting | Default | |
+|---|---|---|
+| `Game:JoinTimeoutSeconds` | 15 | |
+| `Game:ReadyTimeoutSeconds` | 10 | |
+| `Game:StartDelayMs` | 3000 | `RoundStarted.startsInMs` |
+| `Game:PrefetchWindow` | 5 | |
+
 ## Tests
 
 ```bash

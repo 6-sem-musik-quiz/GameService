@@ -15,10 +15,27 @@ public class Game
     // Songs[0] is the shared start card; Songs[1..] are one per round.
     public List<Song> Songs { get; set; } = [];
     public List<GamePlayer> Players { get; set; } = [];
+    // 0 until the first round starts; then the number of the round being played (or last played).
     public int CurrentRound { get; set; }
+    // The round being played right now, or null between rounds. Set by GameCoordinator (SCRUM-102).
+    public ActiveRound? ActiveRound { get; set; }
     public GameStatus Status { get; set; } = GameStatus.Waiting;
     public DateTime? StartedAt { get; set; }
     public DateTime? EndedAt { get; set; }
+
+    // Songs[0] is the start card, so round r plays Songs[r].
+    public Song SongForRound(int round) => Songs[round];
+}
+
+// Server-side timing of one round. Never sent to clients as timestamps.
+public class ActiveRound
+{
+    public int Round { get; init; }
+    public int StartOffsetSeconds { get; init; }
+    // UTC time when the clients start playing (when RoundStarted was sent + startsInMs).
+    public DateTimeOffset PlaybackStartsAt { get; init; }
+    // PlaybackStartsAt + answer time. Answers after this are rejected (SCRUM-103).
+    public DateTimeOffset EndsAt { get; init; }
 }
 
 public class GameSettings
