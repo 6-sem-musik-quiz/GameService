@@ -12,7 +12,7 @@ builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddHealthChecks();
 
 builder.Services.AddRepositoryLayer();
-builder.Services.AddServiceLayer();
+builder.Services.AddServiceLayer(builder.Configuration);
 
 var app = builder.Build();
 
