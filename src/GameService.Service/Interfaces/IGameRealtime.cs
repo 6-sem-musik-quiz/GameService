@@ -9,6 +9,8 @@ public interface IGameNotifier
 {
     Task PrefetchAsync(Guid gameId, IReadOnlyList<PrefetchDto> files);
     Task RoundStartedAsync(Guid gameId, RoundStartedDto round);
+    Task PlayerAnsweredAsync(Guid gameId, PlayerAnsweredDto answered);
+    Task RoundEndedAsync(Guid gameId, RoundEndedDto round);
 }
 
 // Runs a game in real time: who is connected, when the game and each round start (SCRUM-102).
@@ -28,11 +30,16 @@ public interface IGameCoordinator
     // Throws GameAccessException (not a player) or GameRuleException (round outside 1..rounds).
     Task ReadyAsync(Guid gameId, int userId, int round);
 
+    // SCRUM-103: the player places the round's song at slotIndex (0..n, n = cards in the timeline).
+    // The answer is only judged when the round ends. Throws GameRuleException if the round is not
+    // the current one, the time is up, the player has already answered or slotIndex is out of range.
+    Task SubmitAnswerAsync(Guid gameId, int userId, int round, int slotIndex);
+
     // A connection closed. The player stays in the game but no longer counts as connected
     // when the server waits for Ready.
     Task DisconnectedAsync(string connectionId);
 
     // Waits for Ready for the round (or the ready timeout) and then starts it. The first round is
-    // prepared when the game starts; SCRUM-103 calls this for the next round after RoundEnded.
+    // prepared when the game starts; the next one PauseBetweenRoundsSeconds after RoundEnded.
     Task PrepareRoundAsync(Guid gameId, int round);
 }

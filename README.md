@@ -67,12 +67,19 @@ The hub needs a JWT; browsers send it as `?access_token=`. Through the edge it i
 | client → server | `Ready(gameId, round)` | The file for the round is downloaded. May be sent before the round is next. |
 | server → group | `Prefetch([{ round, audioUrl }])` | Rounds 1-5 when the game starts, then round k+5 when round k starts. |
 | server → group | `RoundStarted({ round, totalRounds, startsInMs, startOffsetSeconds, answerTimeSeconds })` | No song info. Clients play after `startsInMs` from `startOffsetSeconds`. |
+| client → server | `SubmitAnswer(gameId, round, slotIndex)` | `slotIndex` 0..n in the caller's timeline (0 = before the first card, n = after the last). Rejected if the round is not the current one, the time is up, the player already answered or the slot is out of range. |
+| server → group | `PlayerAnswered({ userId })` | Someone answered; the answer stays hidden. |
+| server → group | `RoundEnded({ round, song: { title, artists, year }, results: [{ userId, userName, slotIndex?, correct, score, timeline }] })` | When every connected player has answered, or at `endsAt + 1 s`. |
 
 - The game starts when every player has called `JoinGame`, or `Game:JoinTimeoutSeconds` (15) after it was created.
 - A round starts when every **connected** player has sent `Ready`, or after `Game:ReadyTimeoutSeconds` (10).
 - `startOffsetSeconds` is random in `[0, max(0, duration - answerTime)]`. The server keeps
   `endsAt = now + startsInMs + answerTime` to reject late answers (SCRUM-103).
-- Ending a round and starting the next is SCRUM-103: it calls `IGameCoordinator.PrepareRoundAsync(gameId, round + 1)`.
+- **Right answer:** (slot = 0 or year of card[slot-1] ≤ song year) and (slot = n or song year ≤ year of card[slot]).
+  Right → the card goes into the timeline, +1 score, +1 correct. Wrong → nothing. `answered` +1 either way;
+  no answer does not count as answered. Answers are judged when the round ends, so nobody's timeline
+  reveals the song early.
+- The next round is prepared `Game:PauseBetweenRoundsSeconds` (8) after `RoundEnded`.
 
 | Setting | Default | |
 |---|---|---|
@@ -80,6 +87,8 @@ The hub needs a JWT; browsers send it as `?access_token=`. Through the edge it i
 | `Game:ReadyTimeoutSeconds` | 10 | |
 | `Game:StartDelayMs` | 3000 | `RoundStarted.startsInMs` |
 | `Game:PrefetchWindow` | 5 | |
+| `Game:AnswerGraceSeconds` | 1 | Answers this long after `endsAt` still count |
+| `Game:PauseBetweenRoundsSeconds` | 8 | |
 
 ## Tests
 

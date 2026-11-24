@@ -32,7 +32,20 @@ public class GameCoordinatorTests : IDisposable
             return Task.CompletedTask;
         }
 
+        public Task PlayerAnsweredAsync(Guid gameId, PlayerAnsweredDto answered)
+        {
+            Messages.Add(answered);
+            return Task.CompletedTask;
+        }
+
+        public Task RoundEndedAsync(Guid gameId, RoundEndedDto round)
+        {
+            Messages.Add(round);
+            return Task.CompletedTask;
+        }
+
         public List<RoundStartedDto> RoundsStarted => Messages.OfType<RoundStartedDto>().ToList();
+        public List<RoundEndedDto> RoundsEnded => Messages.OfType<RoundEndedDto>().ToList();
 
         public List<int[]> Prefetches =>
             Messages.OfType<IReadOnlyList<PrefetchDto>>().Select(f => f.Select(p => p.Round).ToArray()).ToList();
@@ -88,6 +101,14 @@ public class GameCoordinatorTests : IDisposable
         foreach (var player in game.Players)
             await _coordinator.ReadyAsync(game.Id, player.UserId, round);
     }
+
+    private async Task AllAnswer(Game game, int round, int slotIndex = 0)
+    {
+        foreach (var player in game.Players)
+            await _coordinator.SubmitAnswerAsync(game.Id, player.UserId, round, slotIndex);
+    }
+
+    private void PauseBetweenRounds() => _time.Advance(TimeSpan.FromSeconds(8));
 
     // ---- Start offset ----
 
@@ -261,8 +282,9 @@ public class GameCoordinatorTests : IDisposable
         await StartGame(game);
         await AllReady(game, 1);
         await AllReady(game, 2); // downloaded during round 1
+        await AllAnswer(game, 1);
 
-        await _coordinator.PrepareRoundAsync(game.Id, 2); // what SCRUM-103 does after RoundEnded
+        PauseBetweenRounds();
 
         Assert.Equal([1, 2], _notifier.RoundsStarted.Select(r => r.Round));
     }
@@ -288,14 +310,17 @@ public class GameCoordinatorTests : IDisposable
 
         for (var round = 1; round <= 10; round++)
         {
-            if (round > 1) await _coordinator.PrepareRoundAsync(game.Id, round);
             await AllReady(game, round);
+            await AllAnswer(game, round);
+            PauseBetweenRounds();
         }
 
         Assert.Equal(Enumerable.Range(1, 10), _notifier.RoundsStarted.Select(r => r.Round));
         Assert.Equal([[1, 2, 3, 4, 5], [6], [7], [8], [9], [10]], _notifier.Prefetches);
         // Each RoundStarted for rounds 1-5 is followed by the prefetch of round + 5.
-        var order = _notifier.Messages.Select(m => m is RoundStartedDto r ? $"R{r.Round}" : $"P{string.Join(",", ((IReadOnlyList<PrefetchDto>)m).Select(p => p.Round))}");
+        var order = _notifier.Messages
+            .Where(m => m is RoundStartedDto or IReadOnlyList<PrefetchDto>)
+            .Select(m => m is RoundStartedDto r ? $"R{r.Round}" : $"P{string.Join(",", ((IReadOnlyList<PrefetchDto>)m).Select(p => p.Round))}");
         Assert.Equal(["P1,2,3,4,5", "R1", "P6", "R2", "P7", "R3", "P8", "R4", "P9", "R5", "P10", "R6", "R7", "R8", "R9", "R10"], order);
     }
 
@@ -307,6 +332,138 @@ public class GameCoordinatorTests : IDisposable
         await AllReady(game, 1);
 
         Assert.Equal([[1, 2, 3, 4, 5]], _notifier.Prefetches);
+    }
+
+    // ---- Answers and round end (SCRUM-103) ----
+
+    // Start card is 1970 (Songs[0]); round r plays year 1970 + r.
+    private async Task<Game> GameInRound1(int rounds = 10, int players = 2)
+    {
+        var game = CreateGame(rounds: rounds, players: players);
+        await StartGame(game);
+        await AllReady(game, 1);
+        return game;
+    }
+
+    [Fact]
+    public async Task RightAnswer_AddsTheCardAndAPoint_WrongAnswer_AddsNothing()
+    {
+        var game = await GameInRound1();
+
+        await _coordinator.SubmitAnswerAsync(game.Id, Alice, 1, 1); // 1971 after 1970: right
+        await _coordinator.SubmitAnswerAsync(game.Id, Bob, 1, 0);   // 1971 before 1970: wrong
+
+        var alice = game.Players.Single(p => p.UserId == Alice);
+        var bob = game.Players.Single(p => p.UserId == Bob);
+        Assert.Equal((1, 1, 1), (alice.Score, alice.Correct, alice.Answered));
+        Assert.Equal([1970, 1971], alice.Timeline.Select(c => c.Year));
+        Assert.Equal((0, 0, 1), (bob.Score, bob.Correct, bob.Answered));
+        Assert.Equal([1970], bob.Timeline.Select(c => c.Year));
+    }
+
+    [Fact]
+    public async Task Round_EndsEarly_WhenAllHaveAnswered_AndRevealsSongAndResults()
+    {
+        var game = await GameInRound1();
+
+        await _coordinator.SubmitAnswerAsync(game.Id, Alice, 1, 1);
+        Assert.Empty(_notifier.RoundsEnded);
+        await _coordinator.SubmitAnswerAsync(game.Id, Bob, 1, 0);
+
+        var ended = Assert.Single(_notifier.RoundsEnded);
+        Assert.Equal(1, ended.Round);
+        Assert.Equal(("Song 1", 1971), (ended.Song.Title, ended.Song.Year));
+        var alice = ended.Results.Single(r => r.UserId == Alice);
+        Assert.Equal((1, true, 1), (alice.SlotIndex, alice.Correct, alice.Score));
+        Assert.Equal([1970, 1971], alice.Timeline.Select(c => c.Year));
+        var bob = ended.Results.Single(r => r.UserId == Bob);
+        Assert.Equal((0, false, 0), (bob.SlotIndex, bob.Correct, bob.Score));
+        Assert.Null(game.ActiveRound);
+    }
+
+    [Fact]
+    public async Task PlayerAnswered_IsSentForEachAnswer_WithoutTheAnswer()
+    {
+        var game = await GameInRound1();
+
+        await _coordinator.SubmitAnswerAsync(game.Id, Alice, 1, 1);
+
+        Assert.Equal(new PlayerAnsweredDto(Alice), Assert.Single(_notifier.Messages.OfType<PlayerAnsweredDto>()));
+        Assert.Equal(["userId"], JsonSerializer.SerializeToElement(new PlayerAnsweredDto(Alice), JsonSerializerOptions.Web)
+            .EnumerateObject().Select(p => p.Name));
+    }
+
+    [Fact]
+    public async Task Round_EndsAtEndsAtPlusOneSecond_AndNoAnswerCountsAsNotAnswered()
+    {
+        var game = await GameInRound1();
+        await _coordinator.SubmitAnswerAsync(game.Id, Alice, 1, 1);
+
+        _time.Advance(TimeSpan.FromMilliseconds(3000) + TimeSpan.FromSeconds(30)); // endsAt
+        Assert.Empty(_notifier.RoundsEnded);
+        _time.Advance(TimeSpan.FromSeconds(1));
+
+        var bob = Assert.Single(_notifier.RoundsEnded).Results.Single(r => r.UserId == Bob);
+        Assert.Null(bob.SlotIndex);
+        Assert.False(bob.Correct);
+        Assert.Equal(0, game.Players.Single(p => p.UserId == Bob).Answered);
+    }
+
+    [Fact]
+    public async Task Answer_InTheGraceSecond_StillCounts()
+    {
+        var game = await GameInRound1();
+        _time.Advance(TimeSpan.FromMilliseconds(3000) + TimeSpan.FromSeconds(30.5));
+
+        await _coordinator.SubmitAnswerAsync(game.Id, Alice, 1, 1);
+        _time.Advance(TimeSpan.FromSeconds(1)); // the round ends; answers are judged
+
+        Assert.Equal(1, game.Players.Single(p => p.UserId == Alice).Score);
+    }
+
+    [Fact]
+    public async Task Answers_AreRejected_WhenLateDoubleWrongRoundOrSlotOutOfRange()
+    {
+        var game = await GameInRound1();
+
+        await Assert.ThrowsAsync<GameRuleException>(() => _coordinator.SubmitAnswerAsync(game.Id, Alice, 2, 0));  // not the current round
+        await Assert.ThrowsAsync<GameRuleException>(() => _coordinator.SubmitAnswerAsync(game.Id, Alice, 1, 2));  // timeline has 1 card: 0..1
+        await Assert.ThrowsAsync<GameRuleException>(() => _coordinator.SubmitAnswerAsync(game.Id, Alice, 1, -1));
+        await Assert.ThrowsAsync<GameAccessException>(() => _coordinator.SubmitAnswerAsync(game.Id, Carol, 1, 0));
+
+        await _coordinator.SubmitAnswerAsync(game.Id, Alice, 1, 1);
+        await Assert.ThrowsAsync<GameRuleException>(() => _coordinator.SubmitAnswerAsync(game.Id, Alice, 1, 0)); // double answer
+
+        _time.Advance(TimeSpan.FromSeconds(34)); // round over
+        await Assert.ThrowsAsync<GameRuleException>(() => _coordinator.SubmitAnswerAsync(game.Id, Bob, 1, 0));
+        Assert.Equal(1, game.Players.Single(p => p.UserId == Alice).Answered);
+    }
+
+    [Fact]
+    public async Task NextRound_IsPrepared_EightSecondsAfterRoundEnded()
+    {
+        var game = await GameInRound1();
+        await AllReady(game, 2);
+        await AllAnswer(game, 1, slotIndex: 1);
+
+        _time.Advance(TimeSpan.FromSeconds(7));
+        Assert.Single(_notifier.RoundsStarted);
+        _time.Advance(TimeSpan.FromSeconds(1));
+
+        Assert.Equal([1, 2], _notifier.RoundsStarted.Select(r => r.Round));
+        // The timeline grew, so round 2 allows slots 0..2.
+        await _coordinator.SubmitAnswerAsync(game.Id, Alice, 2, 2);
+    }
+
+    [Fact]
+    public async Task Round_DoesNotWaitForAnswersFrom_DisconnectedPlayers()
+    {
+        var game = await GameInRound1();
+        await _coordinator.SubmitAnswerAsync(game.Id, Alice, 1, 1);
+
+        await _coordinator.DisconnectedAsync("conn-2");
+
+        Assert.Single(_notifier.RoundsEnded);
     }
 
     // ---- What clients see ----

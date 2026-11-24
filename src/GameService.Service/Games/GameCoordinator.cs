@@ -9,13 +9,16 @@ using Microsoft.Extensions.Options;
 
 namespace GameService.Service.Games;
 
-// SCRUM-102: the real-time flow of a game, from players joining to each RoundStarted.
+// SCRUM-102/103: the real-time flow of a game.
 //
 //   created --(all players joined, or JoinTimeoutSeconds)--> Playing: Prefetch rounds 1..5,
-//   then for each round: wait for Ready from every connected player (or ReadyTimeoutSeconds)
-//   --> RoundStarted(round) and Prefetch(round + 5).
-//
-// Ending a round and starting the next one belong to SCRUM-103, which calls PrepareRoundAsync.
+//   then for each round:
+//     wait for Ready from every connected player (or ReadyTimeoutSeconds)
+//     --> RoundStarted(round) and Prefetch(round + 5)
+//     --> answers (PlayerAnswered for each) until every connected player has answered,
+//         or endsAt + AnswerGraceSeconds
+//     --> RoundEnded with the song and everyone's result
+//     --> PauseBetweenRoundsSeconds, then the next round.
 // Each game has its own lock. Messages are sent while it is held, so they reach the group in
 // the order the state changed (Prefetch before the RoundStarted that needs it).
 // All timers come from TimeProvider, so tests control time.
@@ -39,6 +42,8 @@ public sealed class GameCoordinator(
         public HashSet<int> Joined { get; } = [];
         public Dictionary<int, HashSet<string>> Connections { get; } = [];
         public Dictionary<int, HashSet<int>> Ready { get; } = [];
+        // Answers for the active round: userId -> slotIndex. Judged when the round ends.
+        public Dictionary<int, int> Answers { get; } = [];
         // The round the server is waiting for Ready for; 0 when it is not waiting.
         public int PreparingRound { get; set; }
         public ITimer? Timer { get; set; }
@@ -110,6 +115,35 @@ public sealed class GameCoordinator(
         }
     }
 
+    public async Task SubmitAnswerAsync(Guid gameId, int userId, int round, int slotIndex)
+    {
+        var session = GetSession(gameId);
+        await session.Lock.WaitAsync();
+        try
+        {
+            var player = PlayerOrThrow(session, userId);
+            var active = session.Game.ActiveRound;
+            if (active is null || active.Round != round)
+                throw new GameRuleException("That round is not being played.");
+            if (time.GetUtcNow() > active.EndsAt.AddSeconds(_options.AnswerGraceSeconds))
+                throw new GameRuleException("The time is up.");
+            if (session.Answers.ContainsKey(userId))
+                throw new GameRuleException("You have already answered.");
+            if (slotIndex < 0 || slotIndex > player.Timeline.Count)
+                throw new GameRuleException($"slotIndex must be between 0 and {player.Timeline.Count}.");
+
+            session.Answers[userId] = slotIndex;
+            await SendAsync(() => notifier.PlayerAnsweredAsync(gameId, new PlayerAnsweredDto(userId)), gameId);
+
+            if (ConnectedPlayers(session).All(session.Answers.ContainsKey))
+                await EndRoundLockedAsync(session);
+        }
+        finally
+        {
+            session.Lock.Release();
+        }
+    }
+
     public async Task DisconnectedAsync(string connectionId)
     {
         if (!_connections.TryRemove(connectionId, out var entry) || !_sessions.TryGetValue(entry.GameId, out var session))
@@ -120,8 +154,11 @@ public sealed class GameCoordinator(
         {
             if (session.Connections.TryGetValue(entry.UserId, out var connections))
                 connections.Remove(connectionId);
-            // The player who left may have been the only one the round was waiting for.
+            // The player who left may have been the only one the server was waiting for.
             await StartRoundIfAllReadyLockedAsync(session);
+            var connected = ConnectedPlayers(session);
+            if (session.Game.ActiveRound is not null && connected.Count > 0 && connected.All(session.Answers.ContainsKey))
+                await EndRoundLockedAsync(session);
         }
         finally
         {
@@ -177,6 +214,21 @@ public sealed class GameCoordinator(
         }
     }
 
+    private async Task OnRoundTimeoutAsync(Guid gameId, int round)
+    {
+        if (!_sessions.TryGetValue(gameId, out var session)) return;
+        await session.Lock.WaitAsync();
+        try
+        {
+            if (session.Game.ActiveRound?.Round == round)
+                await EndRoundLockedAsync(session);
+        }
+        finally
+        {
+            session.Lock.Release();
+        }
+    }
+
     private async Task StartGameLockedAsync(Session session)
     {
         var game = session.Game;
@@ -194,7 +246,8 @@ public sealed class GameCoordinator(
     private async Task PrepareRoundLockedAsync(Session session, int round)
     {
         var game = session.Game;
-        if (game.Status != GameStatus.Playing || round < 1 || round > game.Settings.Rounds || round <= game.CurrentRound)
+        if (game.Status != GameStatus.Playing || round < 1 || round > game.Settings.Rounds || round <= game.CurrentRound
+            || game.ActiveRound is not null) // never two rounds at once
             return;
 
         session.PreparingRound = round;
@@ -237,6 +290,10 @@ public sealed class GameCoordinator(
         };
         foreach (var done in session.Ready.Keys.Where(r => r <= round).ToList())
             session.Ready.Remove(done);
+        session.Answers.Clear();
+        session.SetTimer(time.CreateTimer(_ => Fire(() => OnRoundTimeoutAsync(game.Id, round)), null,
+            TimeSpan.FromMilliseconds(_options.StartDelayMs) + TimeSpan.FromSeconds(answerTime + _options.AnswerGraceSeconds),
+            Timeout.InfiniteTimeSpan));
 
         var started = new RoundStartedDto(round, game.Settings.Rounds, _options.StartDelayMs, offset, answerTime);
         await SendAsync(() => notifier.RoundStartedAsync(game.Id, started), game.Id);
@@ -249,10 +306,58 @@ public sealed class GameCoordinator(
         }
     }
 
+    // Judges every answer, updates scores and timelines, sends RoundEnded and schedules the next round.
+    private async Task EndRoundLockedAsync(Session session)
+    {
+        var game = session.Game;
+        var active = game.ActiveRound;
+        if (active is null) return;
+
+        game.ActiveRound = null;
+        session.SetTimer(null);
+        var song = game.SongForRound(active.Round);
+
+        var results = new List<RoundResultDto>();
+        foreach (var player in game.Players)
+        {
+            int? slot = session.Answers.TryGetValue(player.UserId, out var s) ? s : null;
+            var correct = slot is { } index && GameEngine.IsCorrectPlacement(player.Timeline, index, song.Year);
+            if (slot is not null)
+                player.Answered++;
+            if (correct)
+            {
+                player.Timeline.Insert(slot!.Value, new TimelineCard { Song = song });
+                player.Score++;
+                player.Correct++;
+            }
+            results.Add(new RoundResultDto(player.UserId, player.UserName, slot, correct, player.Score, Cards(player)));
+        }
+        session.Answers.Clear();
+
+        var ended = new RoundEndedDto(active.Round, ToCard(song), results);
+        await SendAsync(() => notifier.RoundEndedAsync(game.Id, ended), game.Id);
+
+        if (active.Round < game.Settings.Rounds)
+        {
+            var next = active.Round + 1;
+            session.SetTimer(time.CreateTimer(_ => Fire(() => PrepareRoundAsync(game.Id, next)), null,
+                TimeSpan.FromSeconds(_options.PauseBetweenRoundsSeconds), Timeout.InfiniteTimeSpan));
+        }
+        // After the last round the game ends (SCRUM-104).
+    }
+
+    private static List<int> ConnectedPlayers(Session session) =>
+        session.Connections.Where(c => c.Value.Count > 0).Select(c => c.Key).ToList();
+
+    private static CardDto ToCard(Song song) => new(song.Title, song.Artists, song.Year);
+
+    private static List<CardDto> Cards(GamePlayer player) =>
+        player.Timeline.OrderBy(c => c.Year).Select(c => ToCard(c.Song)).ToList();
+
     // True when at least one player is connected and every connected player is ready for the round.
     private static bool AllConnectedReady(Session session, int round)
     {
-        var connected = session.Connections.Where(c => c.Value.Count > 0).Select(c => c.Key).ToList();
+        var connected = ConnectedPlayers(session);
         return connected.Count > 0
                && session.Ready.TryGetValue(round, out var ready)
                && connected.All(ready.Contains);
@@ -277,7 +382,7 @@ public sealed class GameCoordinator(
             game.CurrentRound,
             game.Settings.Rounds,
             game.Players.Select(p => new PlayerSummaryDto(p.UserId, p.UserName, p.Score)).ToList(),
-            me.Timeline.OrderBy(c => c.Year).Select(c => new CardDto(c.Song.Title, c.Song.Artists, c.Song.Year)).ToList(),
+            Cards(me),
             prefetch,
             active is null ? null : RemainingOf(active, game, now));
     }
