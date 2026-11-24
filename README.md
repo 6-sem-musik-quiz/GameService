@@ -37,6 +37,25 @@ dotnet run --project src/GameService.Api
 - Swagger: http://localhost:5005/swagger
 - Health: http://localhost:5005/health
 
+## Creating a game
+
+`POST /api/games` (called by LobbyService, requires a JWT) with
+`{ lobbyId, categoryId, categoryName, rounds, answerTimeSeconds, players: [{ userId, userName }] }`
+returns `201 { gameId }`. `400` on invalid input (2-8 players, unique userIds, rounds and
+answerTimeSeconds > 0), `401` without a valid token, `502` if MusicService fails or returns too few songs.
+
+GameService fetches `rounds + 1` songs from MusicService (`GET /api/playlists/{categoryId}/songs/random?count=rounds+1`)
+with the forwarded token. The first song is the shared start card in every player's timeline; the rest are one per round.
+
+| Setting | Env var | Notes |
+|---|---|---|
+| `Services:MusicService` | `Services__MusicService` | MusicService base URL |
+| `Jwt:SigningKey` | `Jwt__SigningKey` | Same key as UserService; never commit it |
+| `Jwt:Issuer` / `Jwt:Audience` | `Jwt__Issuer` / `Jwt__Audience` | `slopster-userservice` / `slopster` |
+
+**State is in memory** (`IGameStore`, no database), so **only one GameService instance is supported**.
+Finished games are removed 30 minutes after they end.
+
 ## Tests
 
 ```bash

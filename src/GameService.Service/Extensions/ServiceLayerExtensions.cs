@@ -1,3 +1,5 @@
+using GameService.Service.Clients;
+using GameService.Service.Games;
 using GameService.Service.Interfaces;
 using GameService.Service.Options;
 using GameService.Service.Publishers;
@@ -35,6 +37,16 @@ public static class ServiceLayerExtensions
         });
 
         services.AddSingleton<IResultPublisher, ResultPublisher>();
+
+        services.AddSingleton(TimeProvider.System);
+        services.AddSingleton<IGameStore, InMemoryGameStore>();
+        services.AddScoped<IGameEngine, GameEngine>();
+        services.AddHttpClient<IMusicServiceClient, MusicServiceClient>((sp, client) =>
+        {
+            var url = sp.GetRequiredService<IConfiguration>()["Services:MusicService"];
+            if (!string.IsNullOrWhiteSpace(url))
+                client.BaseAddress = new Uri(url.TrimEnd('/') + "/");
+        });
 
         return services;
     }
