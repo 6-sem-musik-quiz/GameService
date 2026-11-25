@@ -652,8 +652,77 @@ public class GameCoordinatorTests : IDisposable
         Assert.Equal((5, 5), (bob.Correct, bob.Answered));
         Assert.Equal(6, bob.Timeline.Count);
         Assert.Equal(GameStatus.Finished, game.Status);
-        Assert.Equal(_time.GetUtcNow().AddSeconds(-8).UtcDateTime, game.EndedAt); // ended before the last pause
+        Assert.Equal(_time.GetUtcNow().UtcDateTime, game.EndedAt); // ended after the last pause
         Assert.Equal(5, _notifier.RoundsStarted.Count); // no round 6
+    }
+
+    // SCRUM-170: the last round's reveal is shown as long as the others before the end screen.
+    [Fact]
+    public async Task GameEnded_IsNotSent_UntilThePauseAfterTheLastRoundEnded_IsOver()
+    {
+        var game = CreateGame(rounds: 2);
+        await StartGame(game);
+        await AllReady(game, 1);
+        await AllAnswer(game, 1);
+        PauseBetweenRounds();
+        await AllReady(game, 2);
+        await AllAnswer(game, 2);
+
+        Assert.Equal(2, _notifier.RoundsEnded.Count);
+        _time.Advance(TimeSpan.FromSeconds(8) - TimeSpan.FromMilliseconds(1));
+        Assert.Empty(_notifier.Messages.OfType<GameEndedDto>());
+        Assert.Equal(GameStatus.Playing, game.Status);
+        await _publisher.DidNotReceive().PublishGameFinishedAsync(Arg.Any<GameFinishedEvent>(), Arg.Any<CancellationToken>());
+
+        _time.Advance(TimeSpan.FromMilliseconds(1));
+        Assert.Single(_notifier.Messages.OfType<GameEndedDto>());
+        Assert.IsType<RoundEndedDto>(_notifier.Messages[^2]);
+        Assert.Equal(GameStatus.Finished, game.Status);
+        await _publisher.Received(1).PublishGameFinishedAsync(Arg.Any<GameFinishedEvent>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task DuringThePauseAfterTheLastRound_NothingCanChangeTheGame()
+    {
+        var game = CreateGame(rounds: 1);
+        await StartGame(game);
+        await AllReady(game, 1);
+        await AllAnswer(game, 1);
+
+        await Assert.ThrowsAsync<GameRuleException>(() => _coordinator.SubmitAnswerAsync(game.Id, Alice, 1, 0));
+        await Assert.ThrowsAsync<GameRuleException>(() => _coordinator.ReadyAsync(game.Id, Alice, 2));
+        await _coordinator.ReadyAsync(game.Id, Alice, 1); // an old round: ignored
+        await _coordinator.PrepareRoundAsync(game.Id, 2);
+
+        Assert.Single(_notifier.RoundsStarted);
+        Assert.Empty(_notifier.Messages.OfType<GameEndedDto>());
+    }
+
+    [Fact]
+    public async Task Rejoin_DuringThePauseAfterTheLastRound_GetsItsResult_ThenGameEnded()
+    {
+        var game = CreateGame(rounds: 2);
+        await StartGame(game);
+        await AllReady(game, 1);
+        await AllAnswer(game, 1);
+        PauseBetweenRounds();
+        await AllReady(game, 2);
+        await AllAnswer(game, 2, slotIndex: 1); // round 1 was wrong, so one card; after it: right
+
+        _time.Advance(TimeSpan.FromSeconds(3));
+        var state = await Join(game, Alice, "conn-1b");
+
+        Assert.Equal(2, state.Round);
+        Assert.Null(state.CurrentRound);
+        Assert.Empty(state.Prefetch);
+        Assert.Equal([1, 2], state.PastSongs!.Select(s => s.Round));
+        var alice = state.Players.Single(p => p.UserId == Alice);
+        Assert.Equal(2, alice.History!.Count);
+        Assert.True(alice.History[^1].Correct);
+        Assert.Empty(_notifier.Messages.OfType<GameEndedDto>());
+
+        _time.Advance(TimeSpan.FromSeconds(5));
+        Assert.Single(_notifier.Messages.OfType<GameEndedDto>());
     }
 
     [Fact]

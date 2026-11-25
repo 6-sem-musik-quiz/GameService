@@ -18,7 +18,7 @@ public class GameOptions
     // The round ends at endsAt + this, unless everyone has answered earlier.
     public int AnswerGraceSeconds { get; set; } = 1;
 
-    // The next round is prepared this long after RoundEnded.
+    // The next round is prepared this long after RoundEnded; after the last round, GameEnded is sent then.
     public int PauseBetweenRoundsSeconds { get; set; } = 8;
 
     // How many rounds ahead the clients download (rounds 1-5 at the start, k+5 when round k starts).
