@@ -20,8 +20,9 @@ namespace GameService.Service.Games;
 //         or endsAt + AnswerGraceSeconds
 //     --> RoundEnded with the song and everyone's result
 //     --> PauseBetweenRoundsSeconds, then the next round.
-//   After the last RoundEnded (SCRUM-104): Finished, GameEnded with placements, and the
-//   GameFinished message to StatisticService over RabbitMQ.
+//   After the last RoundEnded and the same pause, so its reveal can be seen (SCRUM-170):
+//   Finished, GameEnded with placements, and the GameFinished message to StatisticService
+//   over RabbitMQ (SCRUM-104).
 // Each game has its own lock. Messages are sent while it is held, so they reach the group in
 // the order the state changed (Prefetch before the RoundStarted that needs it).
 // All timers come from TimeProvider, so tests control time.
@@ -355,15 +356,26 @@ public sealed class GameCoordinator(
         var ended = new RoundEndedDto(active.Round, ToCard(song), results);
         await SendAsync(() => notifier.RoundEndedAsync(game.Id, ended), game.Id);
 
-        if (active.Round < game.Settings.Rounds)
-        {
-            var next = active.Round + 1;
-            session.SetTimer(time.CreateTimer(_ => Fire(() => PrepareRoundAsync(game.Id, next)), null,
-                TimeSpan.FromSeconds(_options.PauseBetweenRoundsSeconds), Timeout.InfiniteTimeSpan));
-        }
-        else
+        // SCRUM-170: the last round's reveal gets the same pause as the others before GameEnded.
+        // Meanwhile nothing can change the game: there is no active round and no round left to prepare.
+        Func<Task> afterPause = active.Round < game.Settings.Rounds
+            ? () => PrepareRoundAsync(game.Id, active.Round + 1)
+            : () => FinishGameAsync(game.Id);
+        session.SetTimer(time.CreateTimer(_ => Fire(afterPause), null,
+            TimeSpan.FromSeconds(_options.PauseBetweenRoundsSeconds), Timeout.InfiniteTimeSpan));
+    }
+
+    private async Task FinishGameAsync(Guid gameId)
+    {
+        if (!_sessions.TryGetValue(gameId, out var session)) return;
+        await session.Lock.WaitAsync();
+        try
         {
             await FinishGameLockedAsync(session);
+        }
+        finally
+        {
+            session.Lock.Release();
         }
     }
 
