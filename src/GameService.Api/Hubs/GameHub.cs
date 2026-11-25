@@ -20,7 +20,7 @@ public interface IGameClient
 // /api/gameservice/hubs/game. Requires a JWT; browsers send it as ?access_token=.
 // The game logic lives in IGameCoordinator; this class only maps the user and errors.
 [Authorize]
-public class GameHub(IGameCoordinator coordinator) : Hub<IGameClient>
+public class GameHub(IGameCoordinator coordinator, TimeProvider time) : Hub<IGameClient>
 {
     public const string Path = "/hubs/game";
     public const string EdgePath = "/api/hubs/game";
@@ -31,6 +31,10 @@ public class GameHub(IGameCoordinator coordinator) : Hub<IGameClient>
     public Task<GameStateDto> JoinGame(Guid gameId) =>
         Run(() => coordinator.JoinAsync(gameId, UserId(), Context.ConnectionId,
             () => Groups.AddToGroupAsync(Context.ConnectionId, GroupName(gameId))));
+
+    // SCRUM-168: the server's clock, so the client can work out its offset and play at
+    // RoundStarted.PlaybackStartsAt together with everyone else. Changes no state.
+    public DateTimeOffset ServerTime() => time.GetUtcNow();
 
     // The client has downloaded the file for the round.
     public async Task Ready(Guid gameId, int round)

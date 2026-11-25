@@ -778,9 +778,9 @@ public class GameCoordinatorTests : IDisposable
     [Fact]
     public void RoundStarted_HasNoSongInformation()
     {
-        var json = JsonSerializer.SerializeToElement(new RoundStartedDto(1, 10, 3000, 42, 30), JsonSerializerOptions.Web);
+        var json = JsonSerializer.SerializeToElement(new RoundStartedDto(1, 10, 3000, 42, 30, _time.GetUtcNow()), JsonSerializerOptions.Web);
 
-        Assert.Equal(["round", "totalRounds", "startsInMs", "startOffsetSeconds", "answerTimeSeconds"],
+        Assert.Equal(["round", "totalRounds", "startsInMs", "startOffsetSeconds", "answerTimeSeconds", "playbackStartsAt"],
             json.EnumerateObject().Select(p => p.Name));
     }
 
@@ -791,18 +791,29 @@ public class GameCoordinatorTests : IDisposable
         await StartGame(game);
         await AllReady(game, 1);
         var started = _notifier.RoundsStarted.Single();
+        var playbackStartsAt = _time.GetUtcNow().AddMilliseconds(3000);
+        Assert.Equal(playbackStartsAt, started.PlaybackStartsAt);
 
         // Before playback: the remaining delay.
         _time.Advance(TimeSpan.FromMilliseconds(1000));
         var beforePlayback = (await Join(game, Alice, "conn-1b")).CurrentRound!;
-        Assert.Equal(new RoundStartedDto(1, 10, 2000, started.StartOffsetSeconds, 30), beforePlayback);
+        Assert.Equal(new RoundStartedDto(1, 10, 2000, started.StartOffsetSeconds, 30, playbackStartsAt), beforePlayback);
 
-        // 2 s of delay left + 5 s of playback: start now, 5 s further into the song, 5 s less to answer.
+        // 2 s of delay left + 5 s of playback: start now, 5 s further into the song, 5 s less to answer,
+        // and playbackStartsAt moved by the same 5 s, so the three still agree.
         _time.Advance(TimeSpan.FromSeconds(7));
         var state = await Join(game, Alice, "conn-1c");
         Assert.Equal(1, state.Round);
-        Assert.Equal(new RoundStartedDto(1, 10, 0, started.StartOffsetSeconds + 5, 25), state.CurrentRound);
+        Assert.Equal(new RoundStartedDto(1, 10, 0, started.StartOffsetSeconds + 5, 25, playbackStartsAt.AddSeconds(5)),
+            state.CurrentRound);
         Assert.Equal([1, 2, 3, 4, 5, 6], state.Prefetch.Select(p => p.Round));
+
+        // SCRUM-168: between whole seconds the int fields round down, but playbackStartsAt keeps the
+        // exact position: at server time "now" the song is 5.4 s past the original offset.
+        _time.Advance(TimeSpan.FromMilliseconds(400));
+        var between = (await Join(game, Alice, "conn-1e")).CurrentRound!;
+        Assert.Equal(started.StartOffsetSeconds + 5, between.StartOffsetSeconds);
+        Assert.Equal(TimeSpan.FromMilliseconds(400), _time.GetUtcNow() - between.PlaybackStartsAt);
 
         // After the answer time, no current round.
         _time.Advance(TimeSpan.FromSeconds(25));

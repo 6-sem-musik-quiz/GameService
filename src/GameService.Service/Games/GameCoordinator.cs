@@ -309,7 +309,7 @@ public sealed class GameCoordinator(
             TimeSpan.FromMilliseconds(_options.StartDelayMs) + TimeSpan.FromSeconds(answerTime + _options.AnswerGraceSeconds),
             Timeout.InfiniteTimeSpan));
 
-        var started = new RoundStartedDto(round, game.Settings.Rounds, _options.StartDelayMs, offset, answerTime);
+        var started = new RoundStartedDto(round, game.Settings.Rounds, _options.StartDelayMs, offset, answerTime, playbackStartsAt);
         await SendAsync(() => notifier.RoundStartedAsync(game.Id, started), game.Id);
 
         var next = round + _options.PrefetchWindow;
@@ -501,11 +501,14 @@ public sealed class GameCoordinator(
         var untilPlayback = round.PlaybackStartsAt - now;
         if (untilPlayback > TimeSpan.Zero)
             return new RoundStartedDto(round.Round, game.Settings.Rounds, (int)Math.Ceiling(untilPlayback.TotalMilliseconds),
-                round.StartOffsetSeconds, game.Settings.AnswerTimeSeconds);
+                round.StartOffsetSeconds, game.Settings.AnswerTimeSeconds, round.PlaybackStartsAt);
 
+        // The int fields can only move by whole seconds; PlaybackStartsAt moves by the same, so a client
+        // with a server clock offset still gets the exact position (SCRUM-168).
         var played = (int)(now - round.PlaybackStartsAt).TotalSeconds;
         return new RoundStartedDto(round.Round, game.Settings.Rounds, 0,
-            round.StartOffsetSeconds + played, game.Settings.AnswerTimeSeconds - played);
+            round.StartOffsetSeconds + played, game.Settings.AnswerTimeSeconds - played,
+            round.PlaybackStartsAt.AddSeconds(played));
     }
 
     private static List<PrefetchDto> PrefetchFor(Game game, IEnumerable<int> rounds) =>
