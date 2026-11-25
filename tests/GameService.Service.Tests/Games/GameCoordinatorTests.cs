@@ -140,6 +140,30 @@ public class GameCoordinatorTests : IDisposable
             Assert.Contains(max, offsets); // the upper bound can be reached
     }
 
+    // SCRUM-159 keeps the song playing through the reveal: answer time + grace + pause must fit after the
+    // offset, or the song runs out during the reveal (seen in the end-to-end test).
+    [Fact]
+    public void PlaySeconds_IsAnswerTime_PlusGrace_PlusTheRevealPause() =>
+        Assert.Equal(30 + 1 + 8, RoundTiming.PlaySeconds(30, 1, 8));
+
+    [Fact]
+    public async Task EveryRound_LeavesRoomInTheSong_ForTheAnswerTimeAndTheReveal()
+    {
+        var game = CreateGame(rounds: 10, answerTime: 30, durationSeconds: 45); // 45 - (30 + 1 + 8) = 6
+        await StartGame(game);
+
+        for (var round = 1; round <= 10; round++)
+        {
+            await AllReady(game, round);
+            await AllAnswer(game, round);
+            PauseBetweenRounds();
+        }
+
+        var offsets = _notifier.RoundsStarted.Select(r => r.StartOffsetSeconds).ToList();
+        Assert.Equal(10, offsets.Count);
+        Assert.All(offsets, o => Assert.InRange(o, 0, 6));
+    }
+
     [Fact]
     public async Task RoundStarted_OffsetIsZero_WhenSongIsShorterThanAnswerTime()
     {

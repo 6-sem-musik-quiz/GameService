@@ -154,7 +154,7 @@ public class GameHubTests : IClassFixture<WebApplicationFactory<Program>>, IAsyn
         Assert.Equal(5, started.TotalRounds);
         Assert.Equal(0, started.StartsInMs); // Game:StartDelayMs is 0 in these tests (default 3000)
         Assert.Equal(15, started.AnswerTimeSeconds);
-        Assert.InRange(started.StartOffsetSeconds, 0, 180 - 15);
+        Assert.InRange(started.StartOffsetSeconds, 0, 180 - (15 + 1 + 0)); // answer time + grace + pause (0 in these tests)
     }
 
     [Fact]
