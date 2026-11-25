@@ -291,7 +291,8 @@ public sealed class GameCoordinator(
         session.SetTimer(null);
 
         var answerTime = game.Settings.AnswerTimeSeconds;
-        var offset = RoundTiming.PickStartOffset(_random, game.SongForRound(round).DurationSeconds, answerTime);
+        var offset = RoundTiming.PickStartOffset(_random, game.SongForRound(round).DurationSeconds,
+            RoundTiming.PlaySeconds(answerTime, _options.AnswerGraceSeconds, _options.PauseBetweenRoundsSeconds));
         var playbackStartsAt = time.GetUtcNow().AddMilliseconds(_options.StartDelayMs);
 
         game.CurrentRound = round;
