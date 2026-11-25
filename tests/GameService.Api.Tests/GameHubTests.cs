@@ -236,8 +236,25 @@ public class GameHubTests : IClassFixture<WebApplicationFactory<Program>>, IAsyn
         await bob.InvokeAsync("Ready", gameId, 1);
 
         var json = await raw.Task.WaitAsync(Timeout);
-        Assert.Equal(["round", "totalRounds", "startsInMs", "startOffsetSeconds", "answerTimeSeconds"],
+        Assert.Equal(["round", "totalRounds", "startsInMs", "startOffsetSeconds", "answerTimeSeconds", "playbackStartsAt"],
             json.EnumerateObject().Select(p => p.Name));
+        // SCRUM-168: an absolute server time the clients can sync to.
+        Assert.True(DateTimeOffset.TryParse(json.GetProperty("playbackStartsAt").GetString(), out _));
+    }
+
+    // SCRUM-168: the clients sync their clocks to this.
+    [Fact]
+    public async Task ServerTime_ReturnsTheServersUtcNow()
+    {
+        var alice = ConnectionFor(Token(51, "alice"));
+        await alice.StartAsync();
+
+        var before = DateTimeOffset.UtcNow;
+        var server = await alice.InvokeAsync<DateTimeOffset>("ServerTime");
+        var after = DateTimeOffset.UtcNow;
+
+        Assert.InRange(server, before.AddSeconds(-1), after.AddSeconds(1));
+        Assert.Equal(TimeSpan.Zero, server.Offset);
     }
 
     [Fact]

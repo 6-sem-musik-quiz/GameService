@@ -68,9 +68,15 @@ public record GameEndedDto(Guid GameId, IReadOnlyList<StandingDto> Standings);
 public record StandingDto(int UserId, string UserName, int Score, int Correct, int Answered, int Placement,
     IReadOnlyList<CardDto> Timeline);
 
-// startsInMs is relative: the client starts a local timer when the message arrives and plays when
-// it runs out. No server timestamps, so a wrong clock on the player's device does not matter.
+// startsInMs is relative: a v1 client starts a local timer when the message arrives and plays when
+// it runs out, so its network delay is added on top.
+// SCRUM-168 (gameservice.gamehub v1.1): PlaybackStartsAt is the server time (UTC) at which the song is
+// at StartOffsetSeconds; the answer time ends at PlaybackStartsAt + AnswerTimeSeconds. A client that
+// knows its offset to the server clock (GameHub.ServerTime) plays at that instant, so every player
+// starts together whatever their network delay.
 // In GameStateDto.CurrentRound (after a reconnect) the values are what is left of the round:
-// startsInMs until playback (0 if it has started), the offset moved forward by the seconds already
-// played, and answerTimeSeconds reduced by the same.
-public record RoundStartedDto(int Round, int TotalRounds, int StartsInMs, int StartOffsetSeconds, int AnswerTimeSeconds);
+// startsInMs until playback (0 if it has started), the offset moved forward by the whole seconds
+// already played, answerTimeSeconds reduced by the same, and PlaybackStartsAt moved by the same, so
+// the client gets the exact (ms) position from PlaybackStartsAt.
+public record RoundStartedDto(int Round, int TotalRounds, int StartsInMs, int StartOffsetSeconds, int AnswerTimeSeconds,
+    DateTimeOffset? PlaybackStartsAt = null);
