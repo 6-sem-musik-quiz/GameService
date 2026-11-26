@@ -2,10 +2,13 @@ using GameService.Domain.Dtos;
 using GameService.Domain.Models;
 using GameService.Service.Exceptions;
 using GameService.Service.Interfaces;
+using GameService.Service.Sharding;
 
 namespace GameService.Service.Games;
 
-public class GameEngine(IMusicServiceClient musicClient, IGameStore store, IGameCoordinator coordinator) : IGameEngine
+// ids: ADR-0004, the new game gets an id that this pod owns. Null (tests) = any id, as with one shard.
+public class GameEngine(IMusicServiceClient musicClient, IGameStore store, IGameCoordinator coordinator,
+    ShardedGameIds? ids = null) : IGameEngine
 {
     public const int MinPlayers = 2;
     public const int MaxPlayers = 8;
@@ -28,7 +31,7 @@ public class GameEngine(IMusicServiceClient musicClient, IGameStore store, IGame
 
         var game = new Game
         {
-            Id = Guid.NewGuid(),
+            Id = ids?.NewGameId() ?? Guid.NewGuid(),
             LobbyId = request.LobbyId,
             Settings = new GameSettings
             {

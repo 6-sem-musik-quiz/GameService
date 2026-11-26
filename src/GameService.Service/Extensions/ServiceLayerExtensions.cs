@@ -4,6 +4,7 @@ using GameService.Service.Interfaces;
 using GameService.Service.Metrics;
 using GameService.Service.Options;
 using GameService.Service.Publishers;
+using GameService.Service.Sharding;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -49,6 +50,14 @@ public static class ServiceLayerExtensions
             if (int.TryParse(game["AnswerGraceSeconds"], out var grace)) options.AnswerGraceSeconds = grace;
             if (int.TryParse(game["PauseBetweenRoundsSeconds"], out var pause)) options.PauseBetweenRoundsSeconds = pause;
         });
+
+        var sharding = configuration.GetSection(ShardingOptions.SectionName);
+        services.Configure<ShardingOptions>(options =>
+        {
+            if (int.TryParse(sharding["ShardCount"], out var count)) options.ShardCount = count;
+            if (int.TryParse(sharding["ShardIndex"], out var index)) options.ShardIndex = index;
+        });
+        services.AddSingleton<ShardedGameIds>();
 
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton<IGameStore, InMemoryGameStore>();

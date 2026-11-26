@@ -53,10 +53,17 @@ with the forwarded token. The first song is the shared start card in every playe
 | `Jwt:SigningKey` | `Jwt__SigningKey` | Same key as UserService; never commit it |
 | `Jwt:Issuer` / `Jwt:Audience` | `Jwt__Issuer` / `Jwt__Audience` | `slopster-userservice` / `slopster` |
 
-**State is in memory** (`IGameStore`, no database), so **only one GameService instance is supported**.
-Finished games are removed 30 minutes after they end. A restart or deploy ends the games in progress.
-Why, and how it could scale later (sharding on `gameId`, or state in Redis + SignalR backplane):
-[ADR-0004 in Platform](https://github.com/6-sem-musik-quiz/Platform/blob/main/docs/decisions/0004-gameservice-single-instance.md) (SCRUM-129).
+**State is in memory** (`IGameStore`, no database). Finished games are removed 30 minutes after they end.
+A restart or deploy ends the games in progress on that pod.
+
+**Scaling: one pod per shard** ([ADR-0004](https://github.com/6-sem-musik-quiz/Platform/blob/main/docs/decisions/0004-gameservice-sharding.md), SCRUM-129).
+Every game is owned by one pod: `shard(gameId) = FNV-1a-32(lowercase gameId) % N`. A pod creating a game
+draws GUIDs until one hashes to its own shard, and EdgeService routes `?gameId=` on the hub URL to that pod.
+
+| Setting | Env var | Default | |
+|---|---|---|---|
+| `Sharding:ShardCount` | `Sharding__ShardCount` | 1 | N; must match EdgeService's. Change only when no games are running |
+| `Sharding:ShardIndex` | `Sharding__ShardIndex` | last number in `HOSTNAME` | This pod's shard (StatefulSet pod `gameservice-2` = 2) |
 
 ## Playing a game (SignalR, `/hubs/game`)
 
