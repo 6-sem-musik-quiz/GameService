@@ -117,6 +117,20 @@ The hub needs a JWT; browsers send it as `?access_token=`. Through the edge it i
 | `Game:AnswerGraceSeconds` | 1 | Answers this long after `endsAt` still count |
 | `Game:PauseBetweenRoundsSeconds` | 8 | |
 
+## Traces and logs (SCRUM-173)
+
+Traces, metrics and logs go over OTLP (`UseOtlpExporter`, endpoint `OTEL_EXPORTER_OTLP_ENDPOINT`, name
+`OTEL_SERVICE_NAME`, both from the gitops chart) to Alloy, and on to Tempo, Prometheus and Loki.
+
+- **Spans:** HTTP requests (not `/health`), every hub call (`Microsoft.AspNetCore.SignalR.Server`: `JoinGame`,
+  `Ready`, `SubmitAnswer`), calls to MusicService, the `GameFinished` publish (`RabbitMQ.Client.Publisher`, which
+  puts the trace context in the message headers) and the game's timers (`Slopster.Game`: `game.join`,
+  `game.ready`, `game.round`, `game.pause`).
+- **One game is one trace:** the trace context of the request that created the game (LobbyService's
+  `POST /api/games`) is kept in the `GameSession`, and every timer of the game runs in that trace, on whichever pod
+  handles it. The last one publishes `GameFinished`, so StatisticService and LobbyService continue the same trace.
+- **Logs** (`ILogger`) carry the trace id, so Grafana links a log line to its trace.
+
 ## Metrics (SCRUM-119)
 
 OpenTelemetry meter `Slopster.Game`, exported over OTLP to `OTEL_EXPORTER_OTLP_ENDPOINT` (default

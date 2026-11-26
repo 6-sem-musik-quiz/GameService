@@ -25,6 +25,10 @@ public class GameSession
     // What happens next if nothing else does (the game's only timer). A new deadline replaces the
     // old one; a deadline whose token is no longer this one is ignored when it comes due.
     public GameDeadline? Deadline { get; set; }
+
+    // SCRUM-173: the W3C trace context of the request that created the game, so the game's timers and
+    // its GameFinished message continue that trace. Null when the game was created without tracing.
+    public string? TraceParent { get; set; }
 }
 
 // Order is 1 for the first answer of the round, 2 for the next, and so on.
