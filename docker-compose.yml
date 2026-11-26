@@ -1,7 +1,15 @@
+# Runs GameService in Docker on http://localhost:5005.
+#
+#   docker compose up --build
+#
+# Without a Redis connection string the games are kept in memory (one instance only).
+# No JWT signing key, MusicService or RabbitMQ is set here, so the app starts and
+# answers /health, but logins from UserService are not accepted and no game can be
+# created. Use the cluster, or the tests, to try a whole game.
 services:
   api:
-    build: .
+    build: .                     # build the Dockerfile in this repo
     ports:
-      - "5005:8080"
+      - "5005:8080"              # your machine's port 5005 -> the app's port 8080 in the container
     environment:
       ASPNETCORE_ENVIRONMENT: Development
