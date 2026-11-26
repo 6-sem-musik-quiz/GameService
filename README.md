@@ -54,16 +54,20 @@ with the forwarded token. The first song is the shared start card in every playe
 | `Jwt:Issuer` / `Jwt:Audience` | `Jwt__Issuer` / `Jwt__Audience` | `slopster-userservice` / `slopster` |
 
 **State is in memory** (`IGameStore`, no database). Finished games are removed 30 minutes after they end.
-A restart or deploy ends the games in progress on that pod.
+A crash ends the games in progress on that pod; a scale-down or deploy drains it first (below).
 
-**Scaling: one pod per shard** ([ADR-0004](https://github.com/6-sem-musik-quiz/Platform/blob/main/docs/decisions/0004-gameservice-sharding.md), SCRUM-129).
-Every game is owned by one pod: `shard(gameId) = FNV-1a-32(lowercase gameId) % N`. A pod creating a game
-draws GUIDs until one hashes to its own shard, and EdgeService routes `?gameId=` on the hub URL to that pod.
+**Scaling: one pod per shard, the pod is in the gameId** ([ADR-0004](https://github.com/6-sem-musik-quiz/Platform/blob/main/docs/decisions/0004-gameservice-sharding.md), SCRUM-129).
+GameService runs as a StatefulSet (`gameservice-0..N-1`). Every game is owned by the pod that created it, and
+the first two hex characters of its `gameId` are that pod's number (`02a7f3c1-...` = `gameservice-2`).
+EdgeService reads them from `?gameId=` on the hub URL and routes there, so pods can be added (HPA) without
+moving any game.
 
-| Setting | Env var | Default | |
-|---|---|---|---|
-| `Sharding:ShardCount` | `Sharding__ShardCount` | 1 | N; must match EdgeService's. Change only when no games are running |
-| `Sharding:ShardIndex` | `Sharding__ShardIndex` | last number in `HOSTNAME` | This pod's shard (StatefulSet pod `gameservice-2` = 2) |
+| Setting / endpoint | | |
+|---|---|---|
+| `Sharding:ShardIndex` (`Sharding__ShardIndex`) | last number in `HOSTNAME`, else 0 | This pod's number, 0-255 |
+| `GET /health` | liveness | Always OK while the process runs |
+| `GET /health/ready` | readiness | Fails while draining, so the Service sends new games to the other pods |
+| `GET /internal/drain` | `preStop` hook | Stops taking new games (`POST /api/games` gives 503), then returns when no game here is `Waiting` or `Playing`. Not reachable through the edge |
 
 ## Playing a game (SignalR, `/hubs/game`)
 

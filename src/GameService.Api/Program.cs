@@ -8,6 +8,8 @@ using GameService.Repository.Extensions;
 using GameService.Service.Extensions;
 using GameService.Service.Metrics;
 using GameService.Service.Sharding;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using OpenTelemetry.Metrics;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -17,7 +19,10 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
-builder.Services.AddHealthChecks();
+// /health is liveness (the process is up). /health/ready also fails while the pod drains (ADR-0004),
+// so the Service sends new games to the other pods; liveness must not, or the drain would be killed.
+builder.Services.AddHealthChecks()
+    .AddCheck<DrainHealthCheck>("drain", tags: ["ready"]);
 
 // Same validation as UserService (SCRUM-88). Options are resolved lazily so the signing key
 // can come from env (Jwt__SigningKey) or test configuration.
@@ -71,7 +76,8 @@ var app = builder.Build();
 
 // ADR-0004: fail at startup, not at the first game, if the shard settings are wrong.
 var shards = app.Services.GetRequiredService<ShardedGameIds>();
-app.Logger.LogInformation("GameService shard {ShardIndex} of {ShardCount}", shards.ShardIndex, shards.ShardCount);
+app.Logger.LogInformation("GameService shard {ShardIndex}: new games get ids starting with {Prefix}",
+    shards.ShardIndex, shards.ShardIndex.ToString("x2"));
 
 app.UseExceptionHandler();
 
@@ -88,9 +94,29 @@ app.MapControllers();
 // The edge forwards /api/gameservice/hubs/game as /api/hubs/game, so the hub is mapped there too.
 app.MapHub<GameHub>(GameHub.Path);
 app.MapHub<GameHub>(GameHub.EdgePath);
-app.MapHealthChecks("/health");
+app.MapHealthChecks("/health", new HealthCheckOptions { Predicate = check => !check.Tags.Contains("ready") });
+app.MapHealthChecks("/health/ready");
+
+// ADR-0004: Kubernetes' preStop hook. Not under /api, so the edge cannot reach it.
+// Returns when no game in this pod is Waiting or Playing any more.
+app.MapGet("/internal/drain", async (GameDrain drain, ILogger<GameDrain> logger, CancellationToken cancellationToken) =>
+{
+    logger.LogInformation("Draining: no new games; waiting for {ActiveGames} active games", drain.ActiveGames);
+    await drain.DrainAsync(TimeSpan.FromSeconds(2), cancellationToken);
+    logger.LogInformation("Drained: no active games left");
+    return Results.Ok(new { drained = true });
+});
 
 app.Run();
 
 // Exposed so integration tests can use WebApplicationFactory<Program>.
 public partial class Program;
+
+// ADR-0004: not ready while the pod drains before it stops.
+public sealed class DrainHealthCheck(GameDrain drain) : IHealthCheck
+{
+    public Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context, CancellationToken cancellationToken = default) =>
+        Task.FromResult(drain.IsDraining
+            ? HealthCheckResult.Unhealthy($"Draining: {drain.ActiveGames} active games left, no new games")
+            : HealthCheckResult.Healthy());
+}

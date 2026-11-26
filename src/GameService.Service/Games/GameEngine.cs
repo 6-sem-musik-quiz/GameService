@@ -6,9 +6,10 @@ using GameService.Service.Sharding;
 
 namespace GameService.Service.Games;
 
-// ids: ADR-0004, the new game gets an id that this pod owns. Null (tests) = any id, as with one shard.
+// ADR-0004: ids gives the new game an id that names this pod (null in tests = any id), and a pod that
+// is draining (drain, null in tests = never) takes no new games.
 public class GameEngine(IMusicServiceClient musicClient, IGameStore store, IGameCoordinator coordinator,
-    ShardedGameIds? ids = null) : IGameEngine
+    ShardedGameIds? ids = null, GameDrain? drain = null) : IGameEngine
 {
     public const int MinPlayers = 2;
     public const int MaxPlayers = 8;
@@ -20,6 +21,8 @@ public class GameEngine(IMusicServiceClient musicClient, IGameStore store, IGame
     public async Task<CreateGameResponse> CreateGameAsync(CreateGameRequest request, string? bearerToken, CancellationToken cancellationToken = default)
     {
         Validate(request);
+        if (drain?.IsDraining == true)
+            throw new GameServiceDrainingException();
 
         var needed = request.Rounds + 1;
         var songs = await musicClient.GetRandomSongsAsync(request.CategoryId, needed, bearerToken, cancellationToken);

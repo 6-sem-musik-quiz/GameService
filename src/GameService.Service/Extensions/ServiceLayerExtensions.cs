@@ -54,10 +54,10 @@ public static class ServiceLayerExtensions
         var sharding = configuration.GetSection(ShardingOptions.SectionName);
         services.Configure<ShardingOptions>(options =>
         {
-            if (int.TryParse(sharding["ShardCount"], out var count)) options.ShardCount = count;
             if (int.TryParse(sharding["ShardIndex"], out var index)) options.ShardIndex = index;
         });
         services.AddSingleton<ShardedGameIds>();
+        services.AddSingleton<GameDrain>();
 
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton<IGameStore, InMemoryGameStore>();

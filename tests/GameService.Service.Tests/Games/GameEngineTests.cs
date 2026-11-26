@@ -3,6 +3,7 @@ using GameService.Domain.Models;
 using GameService.Service.Exceptions;
 using GameService.Service.Games;
 using GameService.Service.Interfaces;
+using GameService.Service.Sharding;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 
@@ -25,6 +26,32 @@ public class GameEngineTests
         var response = await _engine.CreateGameAsync(Request(), "tok");
 
         _coordinator.Received(1).GameCreated(Arg.Is<Game>(g => g.Id == response.GameId));
+    }
+
+    // ADR-0004: the game id names the pod that created it, and a draining pod takes no new games.
+    [Fact]
+    public async Task CreateGame_GetsAnIdStartingWithThisPodsNumber()
+    {
+        _music.GetRandomSongsAsync(7, 6, "tok", Arg.Any<CancellationToken>()).Returns(Songs(6));
+        var engine = new GameEngine(_music, _store, _coordinator,
+            new ShardedGameIds(new ShardingOptions(), "gameservice-5"));
+
+        var response = await engine.CreateGameAsync(Request(), "tok");
+
+        Assert.StartsWith("05", response.GameId.ToString("D"));
+    }
+
+    [Fact]
+    public async Task CreateGame_WhileDraining_IsRejected_AndCreatesNothing()
+    {
+        var drain = new GameDrain(_store, TimeProvider.System);
+        await drain.DrainAsync(TimeSpan.FromSeconds(1), CancellationToken.None); // nothing active: returns at once
+        var engine = new GameEngine(_music, _store, _coordinator, drain: drain);
+
+        await Assert.ThrowsAsync<GameServiceDrainingException>(() => engine.CreateGameAsync(Request(), "tok"));
+
+        await _music.DidNotReceiveWithAnyArgs().GetRandomSongsAsync(default, default, default, default);
+        _coordinator.DidNotReceiveWithAnyArgs().GameCreated(default!);
     }
 
     private static List<Song> Songs(int n) =>

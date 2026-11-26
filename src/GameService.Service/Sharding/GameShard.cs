@@ -1,44 +1,44 @@
-using System.Text;
+using System.Globalization;
 using System.Text.RegularExpressions;
+using GameService.Domain.Models;
+using GameService.Service.Interfaces;
 using Microsoft.Extensions.Options;
 
 namespace GameService.Service.Sharding;
 
-// ADR-0004 (SCRUM-129): every game is owned by one GameService pod (StatefulSet gameservice-0..N-1).
-//   shard(gameId) = FNV-1a-32(UTF-8(gameId.ToString("D").ToLowerInvariant())) % N
-// EdgeService uses the same function to send the game's hub connection to its owner
-// (gameservice.gamehub@1.3: ?gameId= on the hub URL).
+// ADR-0004 (SCRUM-129, gameservice.gamehub@1.4): every game is owned by one GameService pod
+// (StatefulSet gameservice-0..N-1), and the owner is written in the gameId: the first two hex
+// characters of gameId.ToString("D") are the pod's number (02a7f3c1-... = gameservice-2).
+// The pod writes them when it creates the game; EdgeService reads them to route the game's traffic.
+// The number of pods is not needed anywhere, so pods can be added without moving any game.
 public static class GameShard
 {
-    private const uint OffsetBasis = 2166136261;
-    private const uint Prime = 16777619;
+    public const int MaxShards = 256; // two hex characters
 
-    public static uint Fnv1a32(Guid gameId)
+    public static int Of(Guid gameId) =>
+        int.Parse(gameId.ToString("D").AsSpan(0, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+
+    // A random GUID whose first two hex characters are `shard`.
+    public static Guid NewGameId(int shard)
     {
-        var hash = OffsetBasis;
-        foreach (var b in Encoding.UTF8.GetBytes(gameId.ToString("D").ToLowerInvariant()))
-            hash = unchecked((hash ^ b) * Prime);
-        return hash;
+        if (shard is < 0 or >= MaxShards)
+            throw new ArgumentOutOfRangeException(nameof(shard), shard, $"A shard is 0..{MaxShards - 1}.");
+        var random = Guid.NewGuid().ToString("D");
+        return Guid.Parse(shard.ToString("x2", CultureInfo.InvariantCulture) + random[2..]);
     }
-
-    public static int Of(Guid gameId, int shardCount) => (int)(Fnv1a32(gameId) % (uint)shardCount);
 }
 
-// The "Sharding" section (env Sharding__ShardCount, Sharding__ShardIndex).
+// The "Sharding" section (env Sharding__ShardIndex).
 public class ShardingOptions
 {
     public const string SectionName = "Sharding";
 
-    // N: the number of GameService pods. Must be the same as EdgeService's. 1 = no sharding.
-    public int ShardCount { get; set; } = 1;
-
-    // This pod's shard. Null = the last number in HOSTNAME (StatefulSet pod gameservice-2 is shard 2),
-    // or 0 with one shard.
+    // This pod's number. Null = the last number in HOSTNAME (StatefulSet pod gameservice-2 is 2),
+    // or 0 when the host name does not end in -<number> (local run, single Deployment).
     public int? ShardIndex { get; set; }
 }
 
-// Creates game ids that this pod owns: draws GUIDs until one hashes to this pod's shard
-// (on average ShardCount draws). Whichever pod LobbyService's POST /api/games lands on owns the game.
+// This pod's shard, and the ids of the games it creates.
 public sealed class ShardedGameIds
 {
     private static readonly Regex TrailingNumber = new(@"-(\d+)$", RegexOptions.Compiled);
@@ -48,38 +48,41 @@ public sealed class ShardedGameIds
 
     public ShardedGameIds(ShardingOptions options, string? hostName)
     {
-        ShardCount = options.ShardCount;
-        if (ShardCount < 1)
-            throw new InvalidOperationException($"Sharding:ShardCount must be at least 1, was {ShardCount}.");
-
-        ShardIndex = options.ShardIndex ?? IndexFromHostName(hostName, ShardCount);
-        if (ShardIndex < 0 || ShardIndex >= ShardCount)
+        ShardIndex = options.ShardIndex ?? IndexFromHostName(hostName);
+        if (ShardIndex is < 0 or >= GameShard.MaxShards)
             throw new InvalidOperationException(
-                $"Shard index {ShardIndex} is outside 0..{ShardCount - 1} (Sharding:ShardCount = {ShardCount}).");
+                $"Shard index {ShardIndex} is outside 0..{GameShard.MaxShards - 1} (two hex characters in the gameId).");
     }
 
-    public int ShardCount { get; }
     public int ShardIndex { get; }
 
-    public bool Owns(Guid gameId) => GameShard.Of(gameId, ShardCount) == ShardIndex;
+    public bool Owns(Guid gameId) => GameShard.Of(gameId) == ShardIndex;
 
-    public Guid NewGameId()
-    {
-        while (true)
-        {
-            var id = Guid.NewGuid();
-            if (Owns(id)) return id;
-        }
-    }
+    public Guid NewGameId() => GameShard.NewGameId(ShardIndex);
 
-    private static int IndexFromHostName(string? hostName, int shardCount)
+    private static int IndexFromHostName(string? hostName)
     {
-        if (shardCount == 1) return 0;
         var match = hostName is null ? null : TrailingNumber.Match(hostName);
-        if (match is not { Success: true })
-            throw new InvalidOperationException(
-                $"Sharding:ShardCount is {shardCount}, but the shard index is not set and HOSTNAME '{hostName}' " +
-                "does not end in -<number> (StatefulSet pod name). Set Sharding__ShardIndex.");
-        return int.Parse(match.Groups[1].Value);
+        return match is { Success: true } && int.TryParse(match.Groups[1].Value, out var index) ? index : 0;
+    }
+}
+
+// ADR-0004: before Kubernetes stops this pod (scale-down or deploy), preStop calls /internal/drain.
+// From then on the pod is not ready (/health/ready fails, so the Service sends new games to the other
+// pods), rejects new games, and the drain call returns once no game here is Waiting or Playing.
+public sealed class GameDrain(IGameStore store, TimeProvider time)
+{
+    private volatile bool _draining;
+
+    public bool IsDraining => _draining;
+
+    public int ActiveGames => store.CountByStatus(GameStatus.Waiting) + store.CountByStatus(GameStatus.Playing);
+
+    // Starts draining and waits until no game is active, checking every `poll`.
+    public async Task DrainAsync(TimeSpan poll, CancellationToken cancellationToken)
+    {
+        _draining = true;
+        while (ActiveGames > 0)
+            await Task.Delay(poll, time, cancellationToken);
     }
 }

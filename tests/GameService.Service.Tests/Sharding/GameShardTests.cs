@@ -1,72 +1,136 @@
+using GameService.Domain.Models;
+using GameService.Service.Games;
 using GameService.Service.Sharding;
+using Microsoft.Extensions.Time.Testing;
 
 namespace GameService.Service.Tests.Sharding;
 
-// ADR-0004: shard(gameId) = FNV-1a-32(lowercase "D" string) % N. EdgeService must get the same numbers.
+// ADR-0004 / gameservice.gamehub@1.4: the first two hex characters of the gameId are the owning pod.
 public class GameShardTests
 {
-    // Reference values computed independently (Python) from the ADR's definition.
     [Theory]
-    [InlineData("00000000-0000-0000-0000-000000000000", 3192360657u)]
-    [InlineData("3F1C2A8E-0000-4000-8000-000000000001", 2145607093u)] // upper case input hashes as lower case
-    public void Fnv1a32_MatchesTheContract(string gameId, uint expected) =>
-        Assert.Equal(expected, GameShard.Fnv1a32(Guid.Parse(gameId)));
-
-    [Theory]
-    [InlineData(1)]
-    [InlineData(2)]
-    [InlineData(3)]
-    public void Of_IsBetweenZeroAndShardCount(int shardCount)
-    {
-        for (var i = 0; i < 500; i++)
-            Assert.InRange(GameShard.Of(Guid.NewGuid(), shardCount), 0, shardCount - 1);
-    }
-
-    [Fact]
-    public void Of_SpreadsGamesEvenly()
-    {
-        var counts = new int[4];
-        for (var i = 0; i < 8000; i++)
-            counts[GameShard.Of(Guid.NewGuid(), 4)]++;
-
-        Assert.All(counts, c => Assert.InRange(c, 1700, 2300)); // 2000 each, expected
-    }
-
-    [Theory]
-    [InlineData(3, "gameservice-0", 0)]
-    [InlineData(3, "gameservice-2", 2)]
-    [InlineData(1, null, 0)]
-    [InlineData(1, "my-laptop", 0)]
-    public void ShardIndex_ComesFromThePodName(int count, string? hostName, int expected) =>
-        Assert.Equal(expected, new ShardedGameIds(new ShardingOptions { ShardCount = count }, hostName).ShardIndex);
-
-    [Fact]
-    public void ShardIndex_FromConfiguration_WinsOverThePodName() =>
-        Assert.Equal(1, new ShardedGameIds(new ShardingOptions { ShardCount = 3, ShardIndex = 1 }, "gameservice-2").ShardIndex);
-
-    [Theory]
-    [InlineData(3, null, null)]           // several shards, no index anywhere
-    [InlineData(3, "my-laptop", null)]    // host name without a number
-    [InlineData(3, "gameservice-3", null)] // pod outside 0..N-1
-    [InlineData(2, null, -1)]
-    [InlineData(0, null, null)]
-    public void InvalidSettings_FailAtStartup(int count, string? hostName, int? index) =>
-        Assert.Throws<InvalidOperationException>(() =>
-            new ShardedGameIds(new ShardingOptions { ShardCount = count, ShardIndex = index }, hostName));
+    [InlineData("00a7f3c1-5b2e-4d0a-9c1f-7e3b2a1d4c5e", 0)]
+    [InlineData("02a7f3c1-5b2e-4d0a-9c1f-7e3b2a1d4c5e", 2)]
+    [InlineData("1Fa7f3c1-5b2e-4d0a-9c1f-7e3b2a1d4c5e", 31)] // upper case reads the same
+    [InlineData("ffa7f3c1-5b2e-4d0a-9c1f-7e3b2a1d4c5e", 255)]
+    public void Of_ReadsTheFirstTwoHexCharacters(string gameId, int expected) =>
+        Assert.Equal(expected, GameShard.Of(Guid.Parse(gameId)));
 
     [Theory]
     [InlineData(0)]
-    [InlineData(1)]
     [InlineData(2)]
-    public void NewGameId_IsAlwaysOwnedByThisPod(int index)
+    [InlineData(17)]
+    [InlineData(255)]
+    public void NewGameId_StartsWithTheShard_AndIsOtherwiseRandom(int shard)
     {
-        var ids = new ShardedGameIds(new ShardingOptions { ShardCount = 3, ShardIndex = index }, null);
+        var ids = Enumerable.Range(0, 200).Select(_ => GameShard.NewGameId(shard)).ToList();
 
-        for (var i = 0; i < 200; i++)
-        {
-            var id = ids.NewGameId();
-            Assert.Equal(index, GameShard.Of(id, 3));
-            Assert.True(ids.Owns(id));
-        }
+        Assert.All(ids, id => Assert.Equal(shard, GameShard.Of(id)));
+        Assert.All(ids, id => Assert.StartsWith(shard.ToString("x2"), id.ToString("D")));
+        Assert.Equal(ids.Count, ids.Distinct().Count());
+        Assert.All(ids, id => Assert.Equal('4', id.ToString("D")[14])); // still a version-4 GUID
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(256)]
+    public void NewGameId_OutsideTwoHexCharacters_Throws(int shard) =>
+        Assert.Throws<ArgumentOutOfRangeException>(() => GameShard.NewGameId(shard));
+
+    [Theory]
+    [InlineData("gameservice-0", 0)]
+    [InlineData("gameservice-2", 2)]
+    [InlineData("gameservice-12", 12)]
+    [InlineData(null, 0)]
+    [InlineData("my-laptop", 0)]                    // local run
+    [InlineData("gameservice-7b5d9d5d56-j5p9n", 0)] // a Deployment pod: one pod, shard 0
+    public void ShardIndex_ComesFromThePodName(string? hostName, int expected) =>
+        Assert.Equal(expected, new ShardedGameIds(new ShardingOptions(), hostName).ShardIndex);
+
+    [Fact]
+    public void ShardIndex_FromConfiguration_WinsOverThePodName() =>
+        Assert.Equal(1, new ShardedGameIds(new ShardingOptions { ShardIndex = 1 }, "gameservice-2").ShardIndex);
+
+    [Theory]
+    [InlineData("gameservice-256", null)]
+    [InlineData(null, -1)]
+    [InlineData(null, 300)]
+    public void ShardIndex_OutsideTwoHexCharacters_FailsAtStartup(string? hostName, int? index) =>
+        Assert.Throws<InvalidOperationException>(() =>
+            new ShardedGameIds(new ShardingOptions { ShardIndex = index }, hostName));
+
+    [Fact]
+    public void NewGameId_IsOwnedByThisPod()
+    {
+        var ids = new ShardedGameIds(new ShardingOptions(), "gameservice-3");
+
+        var id = ids.NewGameId();
+
+        Assert.Equal(3, GameShard.Of(id));
+        Assert.True(ids.Owns(id));
+        Assert.False(ids.Owns(GameShard.NewGameId(4)));
+    }
+}
+
+// ADR-0004: the preStop drain waits until no game is Waiting or Playing.
+public class GameDrainTests
+{
+    private readonly FakeTimeProvider _time = new();
+    private readonly InMemoryGameStore _store;
+    private readonly GameDrain _drain;
+
+    public GameDrainTests()
+    {
+        _store = new InMemoryGameStore(_time);
+        _drain = new GameDrain(_store, _time);
+    }
+
+    private Game Add(GameStatus status)
+    {
+        var game = new Game { Id = Guid.NewGuid(), Status = status, EndedAt = status == GameStatus.Finished ? _time.GetUtcNow().UtcDateTime : null };
+        _store.Add(game);
+        return game;
+    }
+
+    [Fact]
+    public async Task Drain_WithNoActiveGames_ReturnsAtOnce_AndMarksThePodDraining()
+    {
+        Add(GameStatus.Finished);
+
+        await _drain.DrainAsync(TimeSpan.FromSeconds(2), CancellationToken.None);
+
+        Assert.True(_drain.IsDraining);
+        Assert.Equal(0, _drain.ActiveGames);
+    }
+
+    [Fact]
+    public async Task Drain_WaitsUntilWaitingAndPlayingGamesHaveFinished()
+    {
+        var playing = Add(GameStatus.Playing);
+        var waiting = Add(GameStatus.Waiting);
+
+        var drained = _drain.DrainAsync(TimeSpan.FromSeconds(2), CancellationToken.None);
+        Assert.True(_drain.IsDraining); // not ready from the first moment
+        Assert.Equal(2, _drain.ActiveGames);
+
+        playing.Status = GameStatus.Finished;
+        _time.Advance(TimeSpan.FromSeconds(2));
+        Assert.False(drained.IsCompleted); // the waiting game is still active
+
+        waiting.Status = GameStatus.Finished;
+        _time.Advance(TimeSpan.FromSeconds(2));
+        await drained.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task Drain_StopsWaiting_WhenTheCallIsCancelled()
+    {
+        Add(GameStatus.Playing);
+        using var cancel = new CancellationTokenSource();
+
+        var drained = _drain.DrainAsync(TimeSpan.FromSeconds(2), cancel.Token);
+        await cancel.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => drained);
     }
 }

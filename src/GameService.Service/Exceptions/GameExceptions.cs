@@ -13,5 +13,10 @@ public class GameAccessException(string message) : Exception(message);
 // A hub call that breaks the game's rules (e.g. Ready for a round that does not exist).
 public class GameRuleException(string message) : Exception(message);
 
+// ADR-0004: this pod is draining before it stops and takes no new games -> 503.
+// LobbyService can retry; the Service no longer sends it here once the pod is not ready.
+public class GameServiceDrainingException()
+    : Exception("This GameService pod is shutting down and takes no new games. Try again.");
+
 // MusicService unreachable or returned an error -> 502.
 public class MusicServiceException(string message, Exception? inner = null) : Exception(message, inner);

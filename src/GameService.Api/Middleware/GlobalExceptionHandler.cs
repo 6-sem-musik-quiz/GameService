@@ -13,6 +13,7 @@ public class GlobalExceptionHandler(
         var (status, title) = exception switch
         {
             GameValidationException => (StatusCodes.Status400BadRequest, exception.Message),
+            GameServiceDrainingException => (StatusCodes.Status503ServiceUnavailable, exception.Message),
             InsufficientSongsException or MusicServiceException =>
                 (StatusCodes.Status502BadGateway, "MusicService could not provide the songs for the game."),
             _ => (StatusCodes.Status500InternalServerError, "An unexpected error occurred.")
