@@ -98,6 +98,31 @@ The hub needs a JWT; browsers send it as `?access_token=`. Through the edge it i
 | `Game:AnswerGraceSeconds` | 1 | Answers this long after `endsAt` still count |
 | `Game:PauseBetweenRoundsSeconds` | 8 | |
 
+## Metrics (SCRUM-119)
+
+OpenTelemetry meter `Slopster.Game`, exported over OTLP to `OTEL_EXPORTER_OTLP_ENDPOINT` (default
+`http://localhost:4317`; the gitops chart points it at Grafana Alloy) and on to Prometheus.
+
+| Metric | Type | |
+|---|---|---|
+| `slopster_games_active` | gauge | Games with `Status = Playing` |
+| `slopster_games_finished_total` | counter | Finished games |
+| `slopster_rounds_played_total` | counter | Ended rounds |
+| `slopster_answers_total{result="correct"\|"wrong"}` | counter | Answers judged when a round ends (no answer is not counted) |
+| `http_server_request_duration_seconds` | histogram | ASP.NET Core response times, by `http_route` |
+
+Example PromQL:
+
+```promql
+sum(slopster_games_active)                                   # games being played now
+sum(increase(slopster_games_finished_total[1h]))             # games finished in the last hour
+sum(rate(slopster_rounds_played_total[5m])) * 60             # rounds per minute
+sum(rate(slopster_answers_total{result="correct"}[1h]))
+  / sum(rate(slopster_answers_total[1h]))                    # share of correct answers
+histogram_quantile(0.95, sum by (le, http_route)
+  (rate(http_server_request_duration_seconds_bucket[5m])))   # p95 response time per endpoint
+```
+
 ## Tests
 
 ```bash

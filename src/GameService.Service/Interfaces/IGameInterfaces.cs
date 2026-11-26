@@ -9,6 +9,8 @@ public interface IGameStore
     Game? Get(Guid gameId);
     // Removes Finished games that ended more than 30 minutes ago.
     int RemoveExpired();
+    // SCRUM-119: for the slopster_games_active gauge.
+    int CountByStatus(GameStatus status);
 }
 
 public interface IMusicServiceClient
