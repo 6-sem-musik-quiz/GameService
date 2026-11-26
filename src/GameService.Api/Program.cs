@@ -11,7 +11,11 @@ using GameService.Repository.State;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using StackExchange.Redis;
+using GameService.Service.Tracing;
+using OpenTelemetry;
+using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
+using OpenTelemetry.Trace;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -78,13 +82,26 @@ builder.Services.AddSingleton<IGameNotifier, SignalRGameNotifier>();
 builder.Services.AddRepositoryLayer(redis);
 builder.Services.AddServiceLayer(builder.Configuration);
 
-// SCRUM-119: metrics over OTLP. The collector address comes from OTEL_EXPORTER_OTLP_ENDPOINT (default
-// http://localhost:4317) and the service name from OTEL_SERVICE_NAME (both set by the gitops chart).
+// SCRUM-119/173: traces, metrics and logs over OTLP. The collector address comes from
+// OTEL_EXPORTER_OTLP_ENDPOINT (default http://localhost:4317) and the service name from OTEL_SERVICE_NAME
+// (both set by the gitops chart). Logs carry the trace id, so Grafana links a log line to its trace.
 builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing
+        .AddAspNetCoreInstrumentation(o => o.Filter = ctx => !ctx.Request.Path.StartsWithSegments("/health"))
+        .AddSource("Microsoft.AspNetCore.SignalR.Server") // one span per hub call: JoinGame, Ready, SubmitAnswer
+        .AddSource("System.Net.Http")                     // calls to MusicService
+        .AddSource("RabbitMQ.Client.Publisher")           // GameFinished, with the trace context in its headers
+        .AddSource(GameTracing.SourceName))               // the game's timers, in the game's trace
     .WithMetrics(metrics => metrics
         .AddAspNetCoreInstrumentation() // http.server.request.duration
-        .AddMeter(GameMetrics.MeterName)
-        .AddOtlpExporter());
+        .AddMeter("System.Net.Http", "System.Runtime", "Microsoft.AspNetCore.SignalR.Server")
+        .AddMeter(GameMetrics.MeterName))
+    .WithLogging(logging => { }, options =>
+    {
+        options.IncludeFormattedMessage = true;
+        options.IncludeScopes = true;
+    })
+    .UseOtlpExporter();
 
 var app = builder.Build();
 

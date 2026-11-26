@@ -7,6 +7,7 @@ using GameService.Service.Exceptions;
 using GameService.Service.Interfaces;
 using GameService.Service.Metrics;
 using GameService.Service.Options;
+using GameService.Service.Tracing;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -77,7 +78,7 @@ public sealed class GameCoordinator : IGameCoordinator, IDisposable
     public async Task GameCreatedAsync(Game game)
     {
         await using var _ = await _locks.AcquireAsync(game.Id);
-        var session = new GameSession { Game = game };
+        var session = new GameSession { Game = game, TraceParent = GameTracing.CurrentTraceParent() };
         await ScheduleAsync(session, DeadlineKind.Join, 0, TimeSpan.FromSeconds(_options.JoinTimeoutSeconds));
         await _store.SaveAsync(session);
     }
@@ -187,6 +188,9 @@ public sealed class GameCoordinator : IGameCoordinator, IDisposable
             var deadline = session.Deadline;
             session.Deadline = null;
             var game = session.Game;
+            // SCRUM-173: the game's timers are spans in the game's own trace.
+            using var activity = GameTracing.StartInGame($"game.{deadline.Kind.ToString().ToLowerInvariant()}", gameId, session.TraceParent);
+            activity?.SetTag("game.round", deadline.Round);
             switch (deadline.Kind)
             {
                 case DeadlineKind.Join when game.Status == GameStatus.Waiting:
