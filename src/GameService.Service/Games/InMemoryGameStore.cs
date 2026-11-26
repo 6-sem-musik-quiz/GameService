@@ -18,6 +18,8 @@ public class InMemoryGameStore(TimeProvider timeProvider) : IGameStore
 
     public Game? Get(Guid gameId) => _games.GetValueOrDefault(gameId);
 
+    public int CountByStatus(GameStatus status) => _games.Values.Count(g => g.Status == status);
+
     public int RemoveExpired()
     {
         var cutoff = timeProvider.GetUtcNow().UtcDateTime - FinishedRetention;

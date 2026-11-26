@@ -1,6 +1,7 @@
 using GameService.Service.Clients;
 using GameService.Service.Games;
 using GameService.Service.Interfaces;
+using GameService.Service.Metrics;
 using GameService.Service.Options;
 using GameService.Service.Publishers;
 using Microsoft.Extensions.Configuration;
@@ -51,6 +52,7 @@ public static class ServiceLayerExtensions
 
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton<IGameStore, InMemoryGameStore>();
+        services.AddSingleton<GameMetrics>();
         // Needs an IGameNotifier, which the Api project registers (SignalR).
         services.AddSingleton<IGameCoordinator, GameCoordinator>();
         services.AddScoped<IGameEngine, GameEngine>();

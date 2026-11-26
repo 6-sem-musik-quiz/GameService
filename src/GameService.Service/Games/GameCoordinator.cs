@@ -4,6 +4,7 @@ using GameService.Domain.Events;
 using GameService.Domain.Models;
 using GameService.Service.Exceptions;
 using GameService.Service.Interfaces;
+using GameService.Service.Metrics;
 using GameService.Service.Options;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -33,7 +34,8 @@ public sealed class GameCoordinator(
     TimeProvider time,
     IOptions<GameOptions> options,
     ILogger<GameCoordinator> logger,
-    Random? random = null) : IGameCoordinator, IDisposable
+    Random? random = null,
+    GameMetrics? metrics = null) : IGameCoordinator, IDisposable
 {
     private readonly GameOptions _options = options.Value;
     private readonly Random _random = random ?? Random.Shared;
@@ -341,7 +343,10 @@ public sealed class GameCoordinator(
             // The range is read before this round's card goes in.
             var range = slot is { } at ? RangeOf(player.Timeline, at) : null;
             if (slot is not null)
+            {
                 player.Answered++;
+                metrics?.Answer(correct);
+            }
             if (correct)
             {
                 player.Timeline.Insert(slot!.Value, new TimelineCard { Song = song });
@@ -353,6 +358,7 @@ public sealed class GameCoordinator(
                 answer?.AfterMs, range));
         }
         session.Answers.Clear();
+        metrics?.RoundPlayed();
 
         var ended = new RoundEndedDto(active.Round, ToCard(song), results);
         await SendAsync(() => notifier.RoundEndedAsync(game.Id, ended), game.Id);
@@ -388,6 +394,7 @@ public sealed class GameCoordinator(
 
         game.Status = GameStatus.Finished;
         game.EndedAt = time.GetUtcNow().UtcDateTime;
+        metrics?.GameFinished();
 
         // SCRUM-151: the bonus awards are added to the normal score before placements are worked out.
         var bonus = BonusCalculator.Calculate(
