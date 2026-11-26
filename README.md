@@ -62,7 +62,7 @@ can die or be replaced without ending its games. Every hub call and timer does: 
 |---|---|
 | `game:{id}` | The `GameSession` (game, joined players, connections, ready, answers, next deadline) as JSON. Kept 30 min after the game finished, else 3 h |
 | `game:{id}:lock` | The game's lock (`SET NX PX 30s`), so one pod at a time changes it |
-| `deadlines` | The games' timers (join, ready, round and pause timeouts) as a sorted set by due time. Every pod polls it every 100 ms; the pod whose `ZREM` succeeds handles the deadline |
+| `deadlines` | The games' timers (join, ready, round and pause timeouts) as a sorted set by due time. Every pod polls it, every 100 ms while there are deadlines and every second when there are none; the pod whose `ZREM` succeeds handles the deadline |
 | `games:playing` | Playing games, for `slopster_games_active` |
 | SignalR channels `slopster-game*` | Redis backplane: group messages reach players on every pod |
 

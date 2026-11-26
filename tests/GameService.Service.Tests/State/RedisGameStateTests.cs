@@ -148,12 +148,37 @@ public class RedisGameStateTests(RedisFixture redis) : IClassFixture<RedisFixtur
         for (var i = 0; i < 30; i++)
             await pods[0].ScheduleAsync(Guid.NewGuid(), $"t{i}", _time.GetUtcNow().AddSeconds(1));
 
-        Assert.Equal(0, await pods[1].PollAsync()); // not due yet
+        Assert.Equal(new PollResult(0, true), await pods[1].PollAsync()); // pending, not due yet
         _time.Advance(TimeSpan.FromSeconds(1));
         await Task.WhenAll(pods.Select(p => p.PollAsync()));
 
         Assert.Equal(30, handled.Count);
         Assert.Equal(30, handled.Distinct().Count());
+    }
+
+    [Fact]
+    public async Task Poll_TellsWhetherAnyDeadlineIsLeft_SoIdlePodsPollLess()
+    {
+        var queue = new RedisDeadlineQueue(redis.Redis, _time, NullLogger<RedisDeadlineQueue>.Instance);
+        var handled = 0;
+        queue.SetHandler((_, _) => { handled++; return Task.CompletedTask; });
+
+        var empty = await queue.PollAsync();
+        Assert.Equal(new PollResult(0, false), empty);
+        Assert.Equal(DeadlinePollingService.IdleInterval, DeadlinePollingService.NextDelay(empty));
+
+        await queue.ScheduleAsync(Guid.NewGuid(), "a", _time.GetUtcNow().AddSeconds(1));
+        await queue.ScheduleAsync(Guid.NewGuid(), "b", _time.GetUtcNow().AddSeconds(5));
+        var waiting = await queue.PollAsync();
+        Assert.Equal(new PollResult(0, true), waiting);
+        Assert.Equal(DeadlinePollingService.BusyInterval, DeadlinePollingService.NextDelay(waiting));
+
+        _time.Advance(TimeSpan.FromSeconds(1));
+        Assert.Equal(new PollResult(1, true), await queue.PollAsync()); // "a" handled, "b" still pending
+        _time.Advance(TimeSpan.FromSeconds(4));
+        Assert.Equal(new PollResult(1, true), await queue.PollAsync()); // "b" handled
+        Assert.Equal(new PollResult(0, false), await queue.PollAsync()); // nothing left: idle again
+        Assert.Equal(2, handled);
     }
 
     // ---- Two GameService pods, one game ----

@@ -104,13 +104,22 @@ public sealed class RedisDeadlineQueue(IConnectionMultiplexer redis, TimeProvide
     public Task ScheduleAsync(Guid gameId, string token, DateTimeOffset dueAt) =>
         redis.GetDatabase().SortedSetAddAsync(RedisKeys.Deadlines, $"{gameId:N}|{token}", dueAt.ToUnixTimeMilliseconds());
 
-    // Claims and runs the deadlines that are due now. Returns how many this pod claimed.
-    public async Task<int> PollAsync()
+    // Claims and runs the deadlines that are due now. Claimed = how many this pod handled; Pending = whether
+    // any deadline is left (due or not), so the poller can slow down when no game is running.
+    // Costs one read (the earliest deadline) when nothing is due, two when something is.
+    public async Task<PollResult> PollAsync()
     {
-        if (_handler is not { } handler) return 0;
+        if (_handler is not { } handler) return new PollResult(0, false);
         var db = redis.GetDatabase();
-        var due = await db.SortedSetRangeByScoreAsync(RedisKeys.Deadlines,
-            double.NegativeInfinity, time.GetUtcNow().ToUnixTimeMilliseconds(), take: 50);
+        var now = time.GetUtcNow().ToUnixTimeMilliseconds();
+
+        var earliest = await db.SortedSetRangeByRankWithScoresAsync(RedisKeys.Deadlines, 0, 0);
+        if (earliest.Length == 0)
+            return new PollResult(0, false); // no game is waiting for anything
+        if (earliest[0].Score > now)
+            return new PollResult(0, true);  // something is coming, nothing is due yet
+
+        var due = await db.SortedSetRangeByScoreAsync(RedisKeys.Deadlines, double.NegativeInfinity, now, take: 50);
 
         var claimed = new List<Task>();
         foreach (var member in due)
@@ -121,7 +130,7 @@ public sealed class RedisDeadlineQueue(IConnectionMultiplexer redis, TimeProvide
             claimed.Add(RunAsync(handler, Guid.Parse(parts[0]), parts[1]));
         }
         await Task.WhenAll(claimed);
-        return claimed.Count;
+        return new PollResult(claimed.Count, true);
     }
 
     private async Task RunAsync(Func<Guid, string, Task> handler, Guid gameId, string token)
@@ -137,26 +146,35 @@ public sealed class RedisDeadlineQueue(IConnectionMultiplexer redis, TimeProvide
     }
 }
 
-// Polls the deadlines every 100 ms in every pod. Deadlines are at least a second apart in a game, so
-// 100 ms is precise enough; a round may end up to that much later than its EndsAt + grace.
+public readonly record struct PollResult(int Claimed, bool Pending);
+
+// Polls the deadlines in every pod: every 100 ms while there are deadlines (a game is running), every
+// second while there are none. Deadlines are at least a second apart in a game, so 100 ms is precise
+// enough (a round may end up to that much after its EndsAt + grace). When idle, the first deadline of a
+// new game (the 15 s join timeout) may come up to a second late, which does not matter; Redis then
+// sees about 1 read per second per pod instead of 10.
 public sealed class DeadlinePollingService(RedisDeadlineQueue queue, ILogger<DeadlinePollingService> logger)
     : BackgroundService
 {
-    public static readonly TimeSpan Interval = TimeSpan.FromMilliseconds(100);
+    public static readonly TimeSpan BusyInterval = TimeSpan.FromMilliseconds(100);
+    public static readonly TimeSpan IdleInterval = TimeSpan.FromSeconds(1);
+
+    public static TimeSpan NextDelay(PollResult result) => result.Pending ? BusyInterval : IdleInterval;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
         {
+            var delay = IdleInterval;
             try
             {
-                await queue.PollAsync();
+                delay = NextDelay(await queue.PollAsync());
             }
             catch (Exception e) when (e is not OperationCanceledException)
             {
                 logger.LogWarning(e, "Polling the game deadlines in Redis failed; trying again");
             }
-            await Task.Delay(Interval, stoppingToken);
+            await Task.Delay(delay, stoppingToken);
         }
     }
 }
