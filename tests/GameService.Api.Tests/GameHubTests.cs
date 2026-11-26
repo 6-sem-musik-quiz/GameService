@@ -215,7 +215,7 @@ public class GameHubTests : IClassFixture<WebApplicationFactory<Program>>, IAsyn
         }
 
         var ended = await gameEnded.Task.WaitAsync(Timeout);
-        Assert.Equal([(51, 5, 1), (52, 0, 2)], ended.Standings.Select(s => (s.UserId, s.Score, s.Placement)));
+        Assert.Equal([(51, 7, 1), (52, 0, 2)], ended.Standings.Select(s => (s.UserId, s.Score, s.Placement)));
         await _publisher.Received(1).PublishGameFinishedAsync(
             Arg.Is<GameService.Domain.Events.GameFinishedEvent>(e => e.GameId == gameId && e.Players.Count == 2), Arg.Any<CancellationToken>());
     }

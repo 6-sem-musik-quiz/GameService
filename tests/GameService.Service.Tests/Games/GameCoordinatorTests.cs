@@ -665,13 +665,13 @@ public class GameCoordinatorTests : IDisposable
         var game = CreateGame(rounds: 5, players: 3);
         await StartGame(game);
 
-        await PlayAllRounds(game, userId => userId == Bob); // Bob 5, Alice 0, Carol 0
+        await PlayAllRounds(game, userId => userId == Bob); // Bob 5 + 2 bonus, Alice 0, Carol 0
 
         Assert.IsType<GameEndedDto>(_notifier.Messages[^1]);
         Assert.IsType<RoundEndedDto>(_notifier.Messages[^2]);
         var ended = Assert.Single(_notifier.Messages.OfType<GameEndedDto>());
         Assert.Equal(game.Id, ended.GameId);
-        Assert.Equal([(Bob, 5, 1), (Alice, 0, 2), (Carol, 0, 2)], ended.Standings.Select(s => (s.UserId, s.Score, s.Placement)));
+        Assert.Equal([(Bob, 7, 1), (Alice, 0, 2), (Carol, 0, 2)], ended.Standings.Select(s => (s.UserId, s.Score, s.Placement)));
         var bob = ended.Standings[0];
         Assert.Equal((5, 5), (bob.Correct, bob.Answered));
         Assert.Equal(6, bob.Timeline.Count);
@@ -756,13 +756,13 @@ public class GameCoordinatorTests : IDisposable
         await StartGame(game);
         var startedAt = game.StartedAt;
 
-        await PlayAllRounds(game, _ => true); // a tie on first place
+        await PlayAllRounds(game, _ => true); // a tie on first place, and both share both awards
 
         await _publisher.Received(1).PublishGameFinishedAsync(Arg.Is<GameFinishedEvent>(e =>
             e.GameId == game.Id && e.Rounds == 5 && e.CatId == 1 && e.CategoryName == "80s"
             && e.StartTime == startedAt && e.EndTime == game.EndedAt
             && e.Players.Count == 2
-            && e.Players.All(p => p.Score == 5 && p.CorrectAnswers == 5 && p.AnsweredRounds == 5 && p.Placement == 1)
+            && e.Players.All(p => p.Score == 7 && p.CorrectAnswers == 5 && p.AnsweredRounds == 5 && p.Placement == 1)
             && e.Players.Select(p => p.UserName).Order().SequenceEqual(new[] { "p1", "p2" })), Arg.Any<CancellationToken>());
     }
 
@@ -778,6 +778,97 @@ public class GameCoordinatorTests : IDisposable
 
         Assert.Single(_notifier.Messages.OfType<GameEndedDto>());
         Assert.Equal(GameStatus.Finished, game.Status);
+    }
+
+    // ---- Bonus awards (SCRUM-151) ----
+
+    // 5 rounds. Bob answers first (1000 ms) and is right in rounds 1-2, then wrong; Alice answers
+    // later (3000 ms) and is right every round. Bob is fastest on correct answers (2 of 5 is enough);
+    // Alice has the longest streak.
+    private async Task PlayFastBobSteadyAlice(Game game)
+    {
+        for (var round = 1; round <= game.Settings.Rounds; round++)
+        {
+            await AllReady(game, round);
+            _time.Advance(TimeSpan.FromMilliseconds(PlaybackDelayMs + 1000));
+            var bob = game.Players.Single(p => p.UserId == Bob);
+            await _coordinator.SubmitAnswerAsync(game.Id, Bob, round, round <= 2 ? bob.Timeline.Count : 0);
+            _time.Advance(TimeSpan.FromMilliseconds(2000));
+            var alice = game.Players.Single(p => p.UserId == Alice);
+            await _coordinator.SubmitAnswerAsync(game.Id, Alice, round, alice.Timeline.Count);
+            PauseBetweenRounds();
+        }
+    }
+
+    [Fact]
+    public async Task GameEnded_HasAwards_AndStandingsIncludeTheBonus()
+    {
+        var game = CreateGame(rounds: 5);
+        await StartGame(game);
+
+        await PlayFastBobSteadyAlice(game);
+
+        var ended = Assert.Single(_notifier.Messages.OfType<GameEndedDto>());
+        Assert.Equal([(Alice, 6, 1), (Bob, 3, 2)], ended.Standings.Select(s => (s.UserId, s.Score, s.Placement)));
+        Assert.Equal([(Alice, 5), (Bob, 2)], ended.Standings.Select(s => (s.UserId, s.Correct)));
+
+        Assert.Equal(["fastest", "streak"], ended.Awards.Select(a => a.Kind));
+        var fastest = ended.Awards[0];
+        Assert.Equal([Bob], fastest.Winners);
+        Assert.Equal([(Bob, (int?)1000, true), (Alice, 3000, true)], fastest.Contenders.Select(c => (c.UserId, c.Value, c.Qualified)));
+        var streak = ended.Awards[1];
+        Assert.Equal([Alice], streak.Winners);
+        Assert.Equal([(Alice, (int?)5, true), (Bob, 2, true)], streak.Contenders.Select(c => (c.UserId, c.Value, c.Qualified)));
+
+        // The round results are still the scores before the awards.
+        Assert.Equal(5, _notifier.RoundsEnded[^1].Results.Single(r => r.UserId == Alice).Score);
+    }
+
+    [Fact]
+    public async Task GameEnded_HasEveryRoundsSong()
+    {
+        var game = CreateGame(rounds: 3);
+        await StartGame(game);
+
+        await PlayAllRounds(game, _ => false);
+
+        var ended = Assert.Single(_notifier.Messages.OfType<GameEndedDto>());
+        Assert.Equal([(1, "Song 1", 1971), (2, "Song 2", 1972), (3, "Song 3", 1973)],
+            ended.Songs.Select(s => (s.Round, s.Song.Title, s.Song.Year)));
+        Assert.All(ended.Awards, a => Assert.Empty(a.Winners));
+    }
+
+    [Fact]
+    public async Task GameFinished_ScoreIncludesTheBonus()
+    {
+        var game = CreateGame(rounds: 5);
+        await StartGame(game);
+
+        await PlayFastBobSteadyAlice(game);
+
+        await _publisher.Received(1).PublishGameFinishedAsync(Arg.Is<GameFinishedEvent>(e =>
+            e.Players.Single(p => p.UserId == Alice).Score == 6
+            && e.Players.Single(p => p.UserId == Alice).Placement == 1
+            && e.Players.Single(p => p.UserId == Bob).Score == 3
+            && e.Players.Single(p => p.UserId == Bob).Placement == 2
+            && e.Players.Single(p => p.UserId == Bob).CorrectAnswers == 2), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public void GameEnded_Json_IsCamelCase()
+    {
+        var dto = new GameEndedDto(Guid.Empty, [],
+            [new AwardDto("fastest", [1], [new AwardContenderDto(1, null, false)])],
+            [new PastSongDto(1, new CardDto("t", ["a"], 1999))]);
+
+        var json = JsonSerializer.SerializeToElement(dto, JsonSerializerOptions.Web);
+
+        Assert.Equal(["gameId", "standings", "awards", "songs"], json.EnumerateObject().Select(p => p.Name));
+        var award = json.GetProperty("awards")[0];
+        Assert.Equal(["kind", "winners", "contenders"], award.EnumerateObject().Select(p => p.Name));
+        var contender = award.GetProperty("contenders")[0];
+        Assert.Equal(["userId", "value", "qualified"], contender.EnumerateObject().Select(p => p.Name));
+        Assert.Equal(JsonValueKind.Null, contender.GetProperty("value").ValueKind);
     }
 
     [Fact]
