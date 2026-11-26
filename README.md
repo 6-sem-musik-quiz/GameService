@@ -54,7 +54,9 @@ with the forwarded token. The first song is the shared start card in every playe
 | `Jwt:Issuer` / `Jwt:Audience` | `Jwt__Issuer` / `Jwt__Audience` | `slopster-userservice` / `slopster` |
 
 **State is in memory** (`IGameStore`, no database), so **only one GameService instance is supported**.
-Finished games are removed 30 minutes after they end.
+Finished games are removed 30 minutes after they end. A restart or deploy ends the games in progress.
+Why, and how it could scale later (sharding on `gameId`, or state in Redis + SignalR backplane):
+[ADR-0004 in Platform](https://github.com/6-sem-musik-quiz/Platform/blob/main/docs/decisions/0004-gameservice-single-instance.md) (SCRUM-129).
 
 ## Playing a game (SignalR, `/hubs/game`)
 
