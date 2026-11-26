@@ -7,6 +7,7 @@ using Microsoft.IdentityModel.Tokens;
 using GameService.Repository.Extensions;
 using GameService.Service.Extensions;
 using GameService.Service.Metrics;
+using GameService.Service.Sharding;
 using OpenTelemetry.Metrics;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -67,6 +68,10 @@ builder.Services.AddOpenTelemetry()
         .AddOtlpExporter());
 
 var app = builder.Build();
+
+// ADR-0004: fail at startup, not at the first game, if the shard settings are wrong.
+var shards = app.Services.GetRequiredService<ShardedGameIds>();
+app.Logger.LogInformation("GameService shard {ShardIndex} of {ShardCount}", shards.ShardIndex, shards.ShardCount);
 
 app.UseExceptionHandler();
 
