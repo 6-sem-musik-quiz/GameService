@@ -3,6 +3,10 @@ namespace GameService.Domain.Events;
 public class GameFinishedEvent
 {
     public Guid GameId { get; set; }
+
+    // v1.1 (SCRUM-172): the lobby the game was started from, so LobbyService can reopen it for "Spil igen".
+    // Contract: Platform docs/contracts/GameService/game-finished.v1.1.schema.json
+    public Guid LobbyId { get; set; }
     public int Rounds { get; set; }
     public DateTime StartTime { get; set; }
     public DateTime EndTime { get; set; }

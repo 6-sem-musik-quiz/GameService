@@ -11,12 +11,14 @@ public class GameFinishedEventTests
     {
         // Arrange
         var gameId = Guid.Parse("11111111-2222-3333-4444-555555555555");
+        var lobbyId = Guid.Parse("66666666-7777-8888-9999-000000000000");
         var startTime = new DateTime(2026, 11, 24, 12, 0, 0, DateTimeKind.Utc);
         var endTime = new DateTime(2026, 11, 24, 12, 10, 0, DateTimeKind.Utc);
 
         var gameFinished = new GameFinishedEvent
         {
             GameId = gameId,
+            LobbyId = lobbyId,
             Rounds = 10,
             StartTime = startTime,
             EndTime = endTime,
@@ -53,6 +55,7 @@ public class GameFinishedEventTests
         var root = doc.RootElement;
 
         Assert.Equal(gameId.ToString(), root.GetProperty("gameId").GetString());
+        Assert.Equal(lobbyId.ToString(), root.GetProperty("lobbyId").GetString()); // v1.1, SCRUM-172
         Assert.Equal(10, root.GetProperty("rounds").GetInt32());
         Assert.Equal(42, root.GetProperty("catId").GetInt32());
         Assert.Equal("80s Rock Classics", root.GetProperty("categoryName").GetString());

@@ -764,7 +764,7 @@ public class GameCoordinatorTests : IDisposable
         await PlayAllRounds(game, _ => true); // a tie on first place, and both share both awards
 
         await _publisher.Received(1).PublishGameFinishedAsync(Arg.Is<GameFinishedEvent>(e =>
-            e.GameId == game.Id && e.Rounds == 5 && e.CatId == 1 && e.CategoryName == "80s"
+            e.GameId == game.Id && e.LobbyId == game.LobbyId && e.Rounds == 5 && e.CatId == 1 && e.CategoryName == "80s"
             && e.StartTime == startedAt && e.EndTime == game.EndedAt
             && e.Players.Count == 2
             && e.Players.All(p => p.Score == 7 && p.CorrectAnswers == 5 && p.AnsweredRounds == 5 && p.Placement == 1)

@@ -365,10 +365,12 @@ public sealed class GameCoordinator : IGameCoordinator, IDisposable
         var gameEnded = new GameEndedDto(game.Id, standings, bonus.Awards, songs);
         await SendAsync(() => _notifier.GameEndedAsync(game.Id, gameEnded), game.Id);
 
-        // Same message and field names as SCRUM-83/84; StatisticService saves it as is.
+        // Same message and field names as SCRUM-83/84 plus lobbyId (v1.1, SCRUM-172). StatisticService saves
+        // the result, LobbyService reopens the lobby.
         var finished = new GameFinishedEvent
         {
             GameId = game.Id,
+            LobbyId = game.LobbyId, // SCRUM-172: LobbyService reopens this lobby
             Rounds = game.Settings.Rounds,
             StartTime = game.StartedAt ?? game.EndedAt.Value,
             EndTime = game.EndedAt.Value,
