@@ -15,11 +15,11 @@ public interface IGameNotifier
 }
 
 // Runs a game in real time: who is connected, when the game and each round start (SCRUM-102).
-// One GameService instance is assumed (see README); the state is in memory.
+// ADR-0004: the games are in IGameSessionStore (Redis in the cluster), so every pod can serve every game.
 public interface IGameCoordinator
 {
-    // Called by GameEngine right after a game is created. Starts the join timeout.
-    void GameCreated(Game game);
+    // Called by GameEngine right after a game is created. Saves it and starts the join timeout.
+    Task GameCreatedAsync(Game game);
 
     // A player's connection joined the game. `subscribe` adds the connection to the game's group;
     // it runs after the membership check and before the game can start, so the connection gets

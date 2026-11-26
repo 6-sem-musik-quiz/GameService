@@ -1,5 +1,6 @@
 using System.Diagnostics.Metrics;
 using GameService.Domain.Models;
+using GameService.Repository.State;
 using GameService.Service.Games;
 using GameService.Service.Interfaces;
 using GameService.Service.Metrics;
@@ -15,7 +16,8 @@ namespace GameService.Service.Tests.Metrics;
 public class GameMetricsTests : IDisposable
 {
     private readonly FakeTimeProvider _time = new(new DateTimeOffset(2026, 11, 26, 12, 0, 0, TimeSpan.Zero));
-    private readonly InMemoryGameStore _store;
+    private readonly InMemoryGameSessionStore _store;
+    private readonly InMemoryDeadlineQueue _deadlines;
     private readonly GameMetrics _metrics;
     private readonly GameCoordinator _coordinator;
     private readonly MeterListener _listener = new();
@@ -23,9 +25,11 @@ public class GameMetricsTests : IDisposable
 
     public GameMetricsTests()
     {
-        _store = new InMemoryGameStore(_time);
+        _store = new InMemoryGameSessionStore(_time);
+        _deadlines = new InMemoryDeadlineQueue(_time);
         _metrics = new GameMetrics(_store);
-        _coordinator = new GameCoordinator(_store, Substitute.For<IGameNotifier>(), Substitute.For<IResultPublisher>(),
+        _coordinator = new GameCoordinator(_store, new InMemoryGameLocks(), _deadlines,
+            Substitute.For<IGameNotifier>(), Substitute.For<IResultPublisher>(),
             _time, MsOptions.Create(new GameOptions()), NullLogger<GameCoordinator>.Instance, new Random(1), _metrics);
 
         // Only this test's meter: other tests may create their own "Slopster.Game" meters in parallel.
@@ -51,6 +55,7 @@ public class GameMetricsTests : IDisposable
         _listener.Dispose();
         _coordinator.Dispose();
         _metrics.Dispose();
+        _deadlines.Dispose();
     }
 
     private long Sum(string name, string? result = null) =>
@@ -77,8 +82,7 @@ public class GameMetricsTests : IDisposable
         };
         foreach (var player in game.Players)
             player.Timeline.Add(new TimelineCard { Song = game.Songs[0] });
-        _store.Add(game);
-        _coordinator.GameCreated(game);
+        _coordinator.GameCreatedAsync(game).GetAwaiter().GetResult();
         return game;
     }
 
