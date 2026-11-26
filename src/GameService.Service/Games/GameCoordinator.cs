@@ -389,13 +389,24 @@ public sealed class GameCoordinator(
         game.Status = GameStatus.Finished;
         game.EndedAt = time.GetUtcNow().UtcDateTime;
 
+        // SCRUM-151: the bonus awards are added to the normal score before placements are worked out.
+        var bonus = BonusCalculator.Calculate(
+            game.Players.Select(p => new BonusCalculator.PlayerRounds(p.UserId, p.History)).ToList(),
+            game.Settings.Rounds);
+        foreach (var player in game.Players)
+            player.Score += bonus.BonusByUser[player.UserId];
+
         // Highest score first; ties in the order the players were in the lobby.
         var players = game.Players.OrderByDescending(p => p.Score).ToList();
         var placements = PlacementCalculator.Calculate(players.Select(p => p.Score).ToList());
 
         var standings = players.Select((p, i) =>
             new StandingDto(p.UserId, p.UserName, p.Score, p.Correct, p.Answered, placements[i], Cards(p))).ToList();
-        await SendAsync(() => notifier.GameEndedAsync(game.Id, new GameEndedDto(game.Id, standings)), game.Id);
+        var songs = Enumerable.Range(1, game.Settings.Rounds)
+            .Select(r => new PastSongDto(r, ToCard(game.SongForRound(r))))
+            .ToList();
+        var gameEnded = new GameEndedDto(game.Id, standings, bonus.Awards, songs);
+        await SendAsync(() => notifier.GameEndedAsync(game.Id, gameEnded), game.Id);
 
         // Same message and field names as SCRUM-83/84; StatisticService saves it as is.
         var finished = new GameFinishedEvent
