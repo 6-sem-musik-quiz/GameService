@@ -11,11 +11,15 @@ namespace GameService.Service.Tests.Games;
 public class GameEngineTests
 {
     private readonly IMusicServiceClient _music = Substitute.For<IMusicServiceClient>();
-    private readonly InMemoryGameStore _store = new(TimeProvider.System);
     private readonly IGameCoordinator _coordinator = Substitute.For<IGameCoordinator>();
     private readonly GameEngine _engine;
 
-    public GameEngineTests() => _engine = new GameEngine(_music, _store, _coordinator);
+    public GameEngineTests() => _engine = new GameEngine(_music, _coordinator);
+
+    // The game GameEngine handed to the coordinator (which saves it, ADR-0004).
+    private Game Created() =>
+        (Game)_coordinator.ReceivedCalls().Single(c => c.GetMethodInfo().Name == nameof(IGameCoordinator.GameCreatedAsync))
+            .GetArguments()[0]!;
 
     [Fact]
     public async Task CreateGame_TellsTheCoordinator_SoTheJoinTimeoutStarts()
@@ -24,7 +28,7 @@ public class GameEngineTests
 
         var response = await _engine.CreateGameAsync(Request(), "tok");
 
-        _coordinator.Received(1).GameCreated(Arg.Is<Game>(g => g.Id == response.GameId));
+        await _coordinator.Received(1).GameCreatedAsync(Arg.Is<Game>(g => g.Id == response.GameId));
     }
 
     private static List<Song> Songs(int n) =>
@@ -47,7 +51,8 @@ public class GameEngineTests
 
         var response = await _engine.CreateGameAsync(Request(), "tok");
 
-        var game = _store.Get(response.GameId)!;
+        var game = Created();
+        Assert.Equal(response.GameId, game.Id);
         Assert.Equal(GameStatus.Waiting, game.Status);
         Assert.Equal(6, game.Songs.Count);
         Assert.All(game.Players, p =>
@@ -122,7 +127,7 @@ public class GameEngineTests
 
         var response = await _engine.CreateGameAsync(request, "tok");
 
-        Assert.Equal(rounds + 1, _store.Get(response.GameId)!.Songs.Count);
+        Assert.Equal(rounds + 1, Created().Songs.Count);
     }
 
     [Fact]
@@ -132,33 +137,5 @@ public class GameEngineTests
         request.CategoryName = " ";
 
         await Assert.ThrowsAsync<GameValidationException>(() => _engine.CreateGameAsync(request, "tok"));
-    }
-}
-
-public class InMemoryGameStoreTests
-{
-    private sealed class FakeTime(DateTimeOffset now) : TimeProvider
-    {
-        public DateTimeOffset Now { get; set; } = now;
-        public override DateTimeOffset GetUtcNow() => Now;
-    }
-
-    [Fact]
-    public void RemoveExpired_RemovesFinishedGamesAfter30Minutes_KeepsOthers()
-    {
-        var time = new FakeTime(new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero));
-        var store = new InMemoryGameStore(time);
-        var finished = new Game { Id = Guid.NewGuid(), Status = GameStatus.Finished, EndedAt = time.Now.UtcDateTime };
-        var waiting = new Game { Id = Guid.NewGuid(), Status = GameStatus.Waiting };
-        store.Add(finished);
-        store.Add(waiting);
-
-        time.Now = time.Now.AddMinutes(29);
-        Assert.Equal(0, store.RemoveExpired());
-
-        time.Now = time.Now.AddMinutes(2);
-        Assert.Equal(1, store.RemoveExpired());
-        Assert.Null(store.Get(finished.Id));
-        Assert.NotNull(store.Get(waiting.Id));
     }
 }

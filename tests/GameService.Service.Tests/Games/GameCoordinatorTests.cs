@@ -2,6 +2,7 @@ using System.Text.Json;
 using GameService.Domain.Dtos;
 using GameService.Domain.Models;
 using GameService.Service.Exceptions;
+using GameService.Repository.State;
 using GameService.Service.Games;
 using GameService.Service.Interfaces;
 using GameService.Service.Options;
@@ -63,17 +64,22 @@ public class GameCoordinatorTests : IDisposable
     private readonly FakeTimeProvider _time = new(new DateTimeOffset(2026, 11, 24, 12, 0, 0, TimeSpan.Zero));
     private readonly RecordingNotifier _notifier = new();
     private readonly IResultPublisher _publisher = Substitute.For<IResultPublisher>();
-    private readonly InMemoryGameStore _store;
+    private readonly InMemoryDeadlineQueue _deadlines;
     private readonly GameCoordinator _coordinator;
 
+    // ADR-0004: the same coordinator as in the cluster, with the in-memory store, locks and deadlines.
     public GameCoordinatorTests()
     {
-        _store = new InMemoryGameStore(_time);
-        _coordinator = new GameCoordinator(_store, _notifier, _publisher, _time, MsOptions.Create(new GameOptions()),
-            NullLogger<GameCoordinator>.Instance, new Random(42));
+        _deadlines = new InMemoryDeadlineQueue(_time);
+        _coordinator = new GameCoordinator(new InMemoryGameSessionStore(_time), new InMemoryGameLocks(), _deadlines,
+            _notifier, _publisher, _time, MsOptions.Create(new GameOptions()), NullLogger<GameCoordinator>.Instance, new Random(42));
     }
 
-    public void Dispose() => _coordinator.Dispose();
+    public void Dispose()
+    {
+        _coordinator.Dispose();
+        _deadlines.Dispose();
+    }
 
     private Game CreateGame(int rounds = 10, int answerTime = 30, int durationSeconds = 200, int players = 2)
     {
@@ -92,8 +98,7 @@ public class GameCoordinatorTests : IDisposable
         foreach (var player in game.Players)
             player.Timeline.Add(new TimelineCard { Song = game.Songs[0] });
 
-        _store.Add(game);
-        _coordinator.GameCreated(game);
+        _coordinator.GameCreatedAsync(game).GetAwaiter().GetResult(); // in memory: completes at once
         return game;
     }
 

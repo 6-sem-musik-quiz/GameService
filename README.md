@@ -53,17 +53,25 @@ with the forwarded token. The first song is the shared start card in every playe
 | `Jwt:SigningKey` | `Jwt__SigningKey` | Same key as UserService; never commit it |
 | `Jwt:Issuer` / `Jwt:Audience` | `Jwt__Issuer` / `Jwt__Audience` | `slopster-userservice` / `slopster` |
 
-**State is in memory** (`IGameStore`, no database). Finished games are removed 30 minutes after they end.
-A restart or deploy ends the games in progress on that pod.
+**The running games are in Redis** ([ADR-0004](https://github.com/6-sem-musik-quiz/Platform/blob/main/docs/decisions/0004-gameservice-scaling.md), SCRUM-129),
+so GameService scales like the other services (X-axis, HPA): any pod can serve any call for any game, and a pod
+can die or be replaced without ending its games. Every hub call and timer does: lock the game, load its
+`GameSession`, change it and send the messages, save it, unlock.
 
-**Scaling: one pod per shard** ([ADR-0004](https://github.com/6-sem-musik-quiz/Platform/blob/main/docs/decisions/0004-gameservice-sharding.md), SCRUM-129).
-Every game is owned by one pod: `shard(gameId) = FNV-1a-32(lowercase gameId) % N`. A pod creating a game
-draws GUIDs until one hashes to its own shard, and EdgeService routes `?gameId=` on the hub URL to that pod.
+| In Redis (`slopster:` prefix) | |
+|---|---|
+| `game:{id}` | The `GameSession` (game, joined players, connections, ready, answers, next deadline) as JSON. Kept 30 min after the game finished, else 3 h |
+| `game:{id}:lock` | The game's lock (`SET NX PX 30s`), so one pod at a time changes it |
+| `deadlines` | The games' timers (join, ready, round and pause timeouts) as a sorted set by due time. Every pod polls it every 100 ms; the pod whose `ZREM` succeeds handles the deadline |
+| `games:playing` | Playing games, for `slopster_games_active` |
+| SignalR channels `slopster-game*` | Redis backplane: group messages reach players on every pod |
 
-| Setting | Env var | Default | |
-|---|---|---|---|
-| `Sharding:ShardCount` | `Sharding__ShardCount` | 1 | N; must match EdgeService's. Change only when no games are running |
-| `Sharding:ShardIndex` | `Sharding__ShardIndex` | last number in `HOSTNAME` | This pod's shard (StatefulSet pod `gameservice-2` = 2) |
+| Setting | Env var | |
+|---|---|---|
+| `ConnectionStrings:Redis` | `ConnectionStrings__Redis` | e.g. `redis-master:6379,password=...`. Empty (local runs, tests): the games are kept in memory, one instance only |
+
+`/health` is liveness; `/health/ready` also checks that Redis answers.
+Code: `GameService.Repository/State` (store, lock, deadlines; Redis and in-memory), `GameCoordinator` (the game flow).
 
 ## Playing a game (SignalR, `/hubs/game`)
 
@@ -114,7 +122,7 @@ OpenTelemetry meter `Slopster.Game`, exported over OTLP to `OTEL_EXPORTER_OTLP_E
 
 | Metric | Type | |
 |---|---|---|
-| `slopster_games_active` | gauge | Games with `Status = Playing` |
+| `slopster_games_active` | gauge | Games with `Status = Playing`, in all pods (every pod reports the same number: use `max`) |
 | `slopster_games_finished_total` | counter | Finished games |
 | `slopster_rounds_played_total` | counter | Ended rounds |
 | `slopster_answers_total{result="correct"\|"wrong"}` | counter | Answers judged when a round ends (no answer is not counted) |
@@ -123,7 +131,7 @@ OpenTelemetry meter `Slopster.Game`, exported over OTLP to `OTEL_EXPORTER_OTLP_E
 Example PromQL:
 
 ```promql
-sum(slopster_games_active)                                   # games being played now
+max(slopster_games_active)                                   # games being played now
 sum(increase(slopster_games_finished_total[1h]))             # games finished in the last hour
 sum(rate(slopster_rounds_played_total[5m])) * 60             # rounds per minute
 sum(rate(slopster_answers_total{result="correct"}[1h]))
@@ -137,6 +145,9 @@ histogram_quantile(0.95, sum by (le, http_route)
 ```bash
 dotnet test
 ```
+
+`RedisGameStateTests` start a real Redis in Docker (Testcontainers), so Docker must be running. They include two
+GameService instances playing one game over a shared Redis, and a game that one instance starts and another finishes.
 
 ## Service ports
 

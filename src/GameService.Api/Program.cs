@@ -7,7 +7,10 @@ using Microsoft.IdentityModel.Tokens;
 using GameService.Repository.Extensions;
 using GameService.Service.Extensions;
 using GameService.Service.Metrics;
-using GameService.Service.Sharding;
+using GameService.Repository.State;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
+using StackExchange.Redis;
 using OpenTelemetry.Metrics;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -17,7 +20,15 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
-builder.Services.AddHealthChecks();
+// ADR-0004: the running games are in Redis (ConnectionStrings__Redis, the same Redis as LobbyService),
+// so GameService can run several pods. Without it (local runs, tests) they are kept in memory.
+var redis = builder.Configuration.GetConnectionString("Redis");
+
+// /health is liveness (the process is up). /health/ready also checks Redis, so a pod that cannot reach
+// the games gets no traffic.
+var health = builder.Services.AddHealthChecks();
+if (!string.IsNullOrWhiteSpace(redis))
+    health.AddCheck<RedisHealthCheck>("redis", tags: ["ready"]);
 
 // Same validation as UserService (SCRUM-88). Options are resolved lazily so the signing key
 // can come from env (Jwt__SigningKey) or test configuration.
@@ -53,10 +64,18 @@ builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationSc
     });
 builder.Services.AddAuthorization();
 
-builder.Services.AddSignalR();
+// With Redis, the SignalR Redis backplane (as LobbyService, SCRUM-128): every pod publishes its group
+// messages on Redis, so RoundStarted reaches a player whose WebSocket is on another pod.
+var signalR = builder.Services.AddSignalR();
+if (!string.IsNullOrWhiteSpace(redis))
+    signalR.AddStackExchangeRedis(redis, o =>
+    {
+        o.Configuration.ChannelPrefix = RedisChannel.Literal("slopster-game");
+        o.Configuration.AbortOnConnectFail = false;
+    });
 builder.Services.AddSingleton<IGameNotifier, SignalRGameNotifier>();
 
-builder.Services.AddRepositoryLayer();
+builder.Services.AddRepositoryLayer(redis);
 builder.Services.AddServiceLayer(builder.Configuration);
 
 // SCRUM-119: metrics over OTLP. The collector address comes from OTEL_EXPORTER_OTLP_ENDPOINT (default
@@ -69,9 +88,11 @@ builder.Services.AddOpenTelemetry()
 
 var app = builder.Build();
 
-// ADR-0004: fail at startup, not at the first game, if the shard settings are wrong.
-var shards = app.Services.GetRequiredService<ShardedGameIds>();
-app.Logger.LogInformation("GameService shard {ShardIndex} of {ShardCount}", shards.ShardIndex, shards.ShardCount);
+// Create the coordinator now, so it handles deadlines from the first poll (with Redis, this pod may
+// pick up deadlines of games it has never seen).
+app.Services.GetRequiredService<IGameCoordinator>();
+app.Logger.LogInformation("GameService keeps its games {Where}",
+    string.IsNullOrWhiteSpace(redis) ? "in memory (one instance only)" : "in Redis (any number of pods)");
 
 app.UseExceptionHandler();
 
@@ -88,9 +109,27 @@ app.MapControllers();
 // The edge forwards /api/gameservice/hubs/game as /api/hubs/game, so the hub is mapped there too.
 app.MapHub<GameHub>(GameHub.Path);
 app.MapHub<GameHub>(GameHub.EdgePath);
-app.MapHealthChecks("/health");
+app.MapHealthChecks("/health", new HealthCheckOptions { Predicate = check => !check.Tags.Contains("ready") });
+app.MapHealthChecks("/health/ready");
 
 app.Run();
 
 // Exposed so integration tests can use WebApplicationFactory<Program>.
 public partial class Program;
+
+// Ready only when Redis answers.
+public sealed class RedisHealthCheck(IConnectionMultiplexer redis) : IHealthCheck
+{
+    public async Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await redis.GetDatabase().PingAsync();
+            return HealthCheckResult.Healthy();
+        }
+        catch (Exception e)
+        {
+            return HealthCheckResult.Unhealthy("Redis does not answer", e);
+        }
+    }
+}
