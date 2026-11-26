@@ -92,8 +92,10 @@ The hub needs a JWT; browsers send it as `?access_token=`. Through the edge it i
 - The next round is prepared `Game:PauseBetweenRoundsSeconds` (8) after `RoundEnded`.
 - **Game end:** after the last round the game is `Finished`, `GameEnded` goes to the players, and
   `GameFinished` is published once to RabbitMQ (exchange `game-events`, routing key `game.finished.v1`)
-  for StatisticService. The message keeps the SCRUM-83 field names (`catId`, `startTime`, `endTime`,
-  `correctAnswers`, `answeredRounds`, `placement`, ...). If publishing fails it is logged; players still get `GameEnded`.
+  for StatisticService and LobbyService. The message keeps the SCRUM-83 field names (`catId`, `startTime`, `endTime`,
+  `correctAnswers`, `answeredRounds`, `placement`, ...) and, since v1.1 (SCRUM-172), has `lobbyId`, so
+  LobbyService can reopen the lobby for "Spil igen" (contract `gameservice.game-finished@1.1` in Platform).
+  If publishing fails it is logged; players still get `GameEnded`.
 - **Bonus awards (SCRUM-151, gamehub v1.2):** at the end, +1 point each, added to the normal score (also in
   `GameFinished`): `fastest` = lowest average answer time on correct answers (needs ⌈rounds/3⌉ correct),
   `streak` = longest run of correct answers in a row (at least 2). Ties share; times within 100 ms are equal.
