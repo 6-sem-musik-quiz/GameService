@@ -17,6 +17,7 @@ public static class RepositoryLayerExtensions
             services.AddSingleton<IGameSessionStore, InMemoryGameSessionStore>();
             services.AddSingleton<IGameLocks, InMemoryGameLocks>();
             services.AddSingleton<IDeadlineQueue, InMemoryDeadlineQueue>();
+            services.AddSingleton<IMaintenanceSwitch, AlwaysOnMaintenanceSwitch>(); // SCRUM-179
             return services;
         }
 
@@ -28,6 +29,7 @@ public static class RepositoryLayerExtensions
         services.AddSingleton<RedisDeadlineQueue>();
         services.AddSingleton<IDeadlineQueue>(sp => sp.GetRequiredService<RedisDeadlineQueue>());
         services.AddHostedService<DeadlinePollingService>();
+        services.AddSingleton<IMaintenanceSwitch, RedisMaintenanceSwitch>(); // SCRUM-179: the edge flag
         return services;
     }
 }
