@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text;
 using GameService.Domain.Dtos;
 using GameService.Domain.Models;
+using GameService.Repository.State;
 using GameService.Service.Exceptions;
 using GameService.Service.Interfaces;
 using Microsoft.AspNetCore.Hosting;
@@ -21,15 +22,22 @@ public class GamesControllerTests : IClassFixture<WebApplicationFactory<Program>
 {
     private const string SigningKey = "test-signing-key-at-least-32-bytes-long!!";
     private readonly IMusicServiceClient _music = Substitute.For<IMusicServiceClient>();
+    private readonly IMaintenanceSwitch _maintenance = Substitute.For<IMaintenanceSwitch>();
     private readonly WebApplicationFactory<Program> _factory;
 
     public GamesControllerTests(WebApplicationFactory<Program> factory)
     {
+        // NSubstitute would return "" (= switched off); on unless a test says otherwise.
+        _maintenance.OffMessageAsync(Arg.Any<CancellationToken>()).Returns((string?)null);
         _factory = factory.WithWebHostBuilder(builder =>
         {
             builder.ConfigureAppConfiguration((_, config) =>
                 config.AddInMemoryCollection(new Dictionary<string, string?> { ["Jwt:SigningKey"] = SigningKey }));
-            builder.ConfigureServices(services => services.AddScoped(_ => _music));
+            builder.ConfigureServices(services =>
+            {
+                services.AddScoped(_ => _music);
+                services.AddSingleton(_ => _maintenance); // on, unless a test switches it off
+            });
         });
     }
 
@@ -139,5 +147,35 @@ public class GamesControllerTests : IClassFixture<WebApplicationFactory<Program>
         var response = await Client(Token()).PostAsJsonAsync("/api/games", Body());
 
         Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
+    }
+
+    // ---- SCRUM-179: switched off by an admin ----
+
+    [Fact]
+    public async Task SwitchedOff_NoNewGame_503WithTheAdminsMessage()
+    {
+        _maintenance.OffMessageAsync(Arg.Any<CancellationToken>()).Returns("Back at 20:00");
+
+        var response = await Client(Token()).PostAsJsonAsync("/api/games", Body());
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal(TimeSpan.FromSeconds(30), response.Headers.RetryAfter?.Delta);
+        var problem = await response.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>();
+        Assert.Equal("https://quiz.munkcloud.dk/problems/maintenance", problem.GetProperty("type").GetString());
+        Assert.Equal("Back at 20:00", problem.GetProperty("detail").GetString());
+        Assert.Equal("gameservice", problem.GetProperty("service").GetString());
+        await _music.DidNotReceiveWithAnyArgs().GetRandomSongsAsync(default, default, default, default);
+    }
+
+    [Fact]
+    public async Task SwitchedBackOn_GamesStartAgain()
+    {
+        var token = Token();
+        _music.GetRandomSongsAsync(3, 6, token, Arg.Any<CancellationToken>()).Returns(Songs(6));
+        _maintenance.OffMessageAsync(Arg.Any<CancellationToken>()).Returns("off", (string?)null);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await Client(token).PostAsJsonAsync("/api/games", Body())).StatusCode);
+        Assert.Equal(HttpStatusCode.Created, (await Client(token).PostAsJsonAsync("/api/games", Body())).StatusCode);
     }
 }
